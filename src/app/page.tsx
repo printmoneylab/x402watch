@@ -4,6 +4,8 @@ import { Differentiators } from "@/components/landing/Differentiators";
 import { ChartGrid } from "@/components/landing/Charts";
 import { Footer } from "@/components/landing/Footer";
 import { fetchLandingPayload, FALLBACK } from "@/lib/stats";
+import { JsonLd } from "@/components/common/JsonLd";
+import { websiteSchema, organizationSchema } from "@/lib/jsonld";
 
 export const revalidate = 60;
 
@@ -20,6 +22,7 @@ export default async function HomePage() {
   const payload = await getPayload();
   return (
     <>
+      <JsonLd data={[websiteSchema(), organizationSchema()]} />
       <Hero />
       <Stats stats={payload.stats} />
       <ProductLine />

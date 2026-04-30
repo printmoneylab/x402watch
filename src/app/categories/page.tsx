@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { Suspense } from "react";
 import { CategoriesView } from "@/components/categories/CategoriesView";
 import { fetchCategories, type CategoryListPayload } from "@/lib/categories";
+import { JsonLd } from "@/components/common/JsonLd";
+import { datasetSchema, SITE_URL, API_BASE } from "@/lib/jsonld";
 
 export const revalidate = 300;
 
@@ -34,6 +36,15 @@ export default async function CategoriesPage() {
 
   return (
     <main className="flex-1">
+      <JsonLd
+        data={datasetSchema({
+          name: "x402 service categories",
+          description: `${payload.total_categories} categories spanning ${payload.total_services} indexed x402 services, with 24h volume, transaction counts, and label distribution.`,
+          url: `${SITE_URL}/categories`,
+          apiUrl: `${API_BASE}/categories`,
+          dateModified: payload.last_updated,
+        })}
+      />
       <section className="border-b border-foreground/10">
         <div className="mx-auto max-w-6xl px-6 pt-12 pb-8 sm:pt-16 sm:pb-10">
           <h1 className="text-3xl sm:text-5xl font-semibold tracking-tight text-balance max-w-[24ch]">

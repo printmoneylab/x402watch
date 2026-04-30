@@ -10,6 +10,8 @@ import {
   SORT_KEYS,
 } from "@/lib/services";
 import { fetchCategories } from "@/lib/categories";
+import { JsonLd } from "@/components/common/JsonLd";
+import { datasetSchema, SITE_URL, API_BASE } from "@/lib/jsonld";
 
 export const revalidate = 300;
 
@@ -82,6 +84,14 @@ export default async function ServicesPage({
 
   return (
     <main className="flex-1">
+      <JsonLd
+        data={datasetSchema({
+          name: "x402 services",
+          description: `${payload.pagination.total.toLocaleString()} indexed x402 services across all chains, with filters, classification labels, and real-vs-wash splits.`,
+          url: `${SITE_URL}/services`,
+          apiUrl: `${API_BASE}/services`,
+        })}
+      />
       <section className="border-b border-foreground/10">
         <div className="mx-auto max-w-7xl px-6 pt-12 pb-8 sm:pt-16 sm:pb-10">
           <h1 className="text-3xl sm:text-5xl font-semibold tracking-tight text-balance max-w-[24ch]">

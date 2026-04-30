@@ -7,6 +7,8 @@ import {
   HotServices,
   RecentNewServices,
 } from "@/components/trends/HotServices";
+import { JsonLd } from "@/components/common/JsonLd";
+import { datasetSchema, SITE_URL, API_BASE } from "@/lib/jsonld";
 
 export const revalidate = 300;
 
@@ -28,6 +30,14 @@ export default async function TrendsPage() {
 
   return (
     <main className="flex-1">
+      <JsonLd
+        data={datasetSchema({
+          name: "x402 trends — last 24 hours",
+          description: `Daily x402 ecosystem snapshot: ${payload.summary.new_services_24h} new services, ${payload.summary.total_tx_24h.toLocaleString()} transactions, category volume movers, and surging-activity services.`,
+          url: `${SITE_URL}/trends`,
+          apiUrl: `${API_BASE}/trends`,
+        })}
+      />
       <section className="border-b border-foreground/10">
         <div className="mx-auto max-w-7xl px-6 pt-12 pb-8 sm:pt-16 sm:pb-10">
           <h1 className="text-3xl sm:text-5xl font-semibold tracking-tight text-balance max-w-[24ch]">

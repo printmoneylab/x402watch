@@ -9,6 +9,13 @@ import {
   ServiceLabelDonut,
 } from "@/components/services/DetailCharts";
 import { TopBuyersTable } from "@/components/services/TopBuyersTable";
+import { JsonLd } from "@/components/common/JsonLd";
+import {
+  serviceSchema,
+  datasetSchema,
+  SITE_URL,
+  API_BASE,
+} from "@/lib/jsonld";
 
 export const revalidate = 300;
 // Don't pre-render at build time — 36k services is too many.
@@ -59,8 +66,28 @@ export default async function ServiceDetailPage({
   const s = detail.service;
   const st = detail.stats;
 
+  const detailUrl = `${SITE_URL}/services/${s.id}`;
   return (
     <main className="flex-1">
+      <JsonLd
+        data={[
+          serviceSchema({
+            id: s.id,
+            name: s.name ?? `service ${s.id}`,
+            description: s.description,
+            category: s.category,
+            priceUsd: s.price_amount,
+            url: detailUrl,
+          }),
+          datasetSchema({
+            name: `x402 service #${s.id}: time series and buyer labels`,
+            description: `30-day daily volume, transaction counts, and buyer-label distribution for ${s.name ?? `service ${s.id}`}.`,
+            url: detailUrl,
+            apiUrl: `${API_BASE}/services/${s.id}`,
+            dateModified: s.last_seen ?? undefined,
+          }),
+        ]}
+      />
       <section className="border-b border-foreground/10">
         <div className="mx-auto max-w-6xl px-6 pt-10 pb-8 sm:pt-14 sm:pb-10">
           <Link

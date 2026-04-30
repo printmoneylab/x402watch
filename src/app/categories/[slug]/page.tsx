@@ -13,6 +13,8 @@ import {
   PriceHistogram,
 } from "@/components/categories/DetailCharts";
 import { TopServicesTable } from "@/components/categories/TopServicesTable";
+import { JsonLd } from "@/components/common/JsonLd";
+import { datasetSchema, SITE_URL, API_BASE } from "@/lib/jsonld";
 
 export const revalidate = 300;
 
@@ -61,8 +63,18 @@ export default async function CategoryDetailPage({
   if (!detail) notFound();
   const s = detail.stats;
 
+  const slugSafe = encodeURIComponent(detail.category);
   return (
     <main className="flex-1">
+      <JsonLd
+        data={datasetSchema({
+          name: `x402 category: ${prettyCategory(detail.category)}`,
+          description: `${s.services_count} ${prettyCategory(detail.category)} services on x402 — ${s.real_volume_pct.toFixed(0)}% real volume, ${s.tx_24h.toLocaleString()} transactions in the last 24h.`,
+          url: `${SITE_URL}/categories/${slugSafe}`,
+          apiUrl: `${API_BASE}/categories/${slugSafe}`,
+          dateModified: s.last_hour ?? undefined,
+        })}
+      />
       <section className="border-b border-foreground/10">
         <div className="mx-auto max-w-6xl px-6 pt-10 pb-8 sm:pt-14 sm:pb-10">
           <Link

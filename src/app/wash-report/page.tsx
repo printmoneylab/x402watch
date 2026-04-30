@@ -15,6 +15,13 @@ import {
   OperatorBox,
 } from "@/components/wash/MethodologyCTA";
 import { RelativeTime } from "@/components/common/RelativeTime";
+import { JsonLd } from "@/components/common/JsonLd";
+import {
+  datasetSchema,
+  articleSchema,
+  SITE_URL,
+  API_BASE,
+} from "@/lib/jsonld";
 
 export const revalidate = 300;
 
@@ -32,8 +39,28 @@ export default async function WashReportPage() {
     console.error("[wash-report] live fetch failed, using fallback:", err);
   }
 
+  const updatedIso = payload.stats.last_updated || new Date().toISOString();
   return (
     <main className="flex-1">
+      <JsonLd
+        data={[
+          articleSchema({
+            headline: "x402 Wash Report — open methodology, anonymized findings",
+            description:
+              "Aggregate wash detection across the x402 ecosystem: 8-label classification, 30-day trends, anonymized case studies. Updated daily.",
+            url: `${SITE_URL}/wash-report`,
+            datePublished: updatedIso,
+            dateModified: updatedIso,
+          }),
+          datasetSchema({
+            name: "x402 wash report dataset",
+            description: `Buyer-level label distribution and wash-percentage time series across the x402 ecosystem (${payload.stats.total_active_buyers_30d.toLocaleString()} active buyers, last 30 days).`,
+            url: `${SITE_URL}/wash-report`,
+            apiUrl: `${API_BASE}/wash-report`,
+            dateModified: updatedIso,
+          }),
+        ]}
+      />
       <section className="border-b border-foreground/10">
         <div className="mx-auto max-w-7xl px-6 pt-12 pb-8 sm:pt-16 sm:pb-10">
           <h1 className="text-3xl sm:text-5xl font-semibold tracking-tight text-balance max-w-[24ch]">

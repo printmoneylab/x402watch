@@ -25,6 +25,18 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       changeFrequency: "hourly",
       priority: 0.9,
     },
+    {
+      url: `${SITE_URL}/trends`,
+      lastModified,
+      changeFrequency: "daily",
+      priority: 0.8,
+    },
+    {
+      url: `${SITE_URL}/wash-report`,
+      lastModified,
+      changeFrequency: "daily",
+      priority: 0.9,
+    },
   ];
 
   // Append per-category detail pages (best-effort; degrade silently if API down)

@@ -10,7 +10,8 @@ const NAV = [
   { href: "/", label: "Home" },
   { href: "/categories", label: "Categories" },
   { href: "/services", label: "Services" },
-  // { href: "/trends",   label: "Trends" },   // Day 14
+  { href: "/trends", label: "Trends" },
+  { href: "/wash-report", label: "Wash Report" },
 ];
 
 export function Header() {

@@ -1,0 +1,11 @@
+{
+  "name": "x402watch",
+  "description": "Wash-filtered intelligence layer for x402",
+  "version": "1.0.0",
+  "api": "https://api.x402.printmoneylab.com/api/v1",
+  "documentation": "https://x402.printmoneylab.com",
+  "license": {
+    "code": "Apache-2.0",
+    "data": "CC0-1.0"
+  }
+}

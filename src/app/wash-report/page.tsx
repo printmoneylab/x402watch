@@ -14,6 +14,7 @@ import {
   MethodologyCTA,
   OperatorBox,
 } from "@/components/wash/MethodologyCTA";
+import { RelativeTime } from "@/components/common/RelativeTime";
 
 export const revalidate = 300;
 
@@ -22,21 +23,6 @@ export const metadata: Metadata = {
   description:
     "Open methodology, anonymized findings on suspected wash, self-test, and developer traffic across x402. Updated daily.",
 };
-
-function fmtUpdated(iso: string): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleString("en-US", {
-    timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-}
 
 export default async function WashReportPage() {
   let payload: WashReportPayload = WASH_FALLBACK;
@@ -57,9 +43,10 @@ export default async function WashReportPage() {
             Open methodology, anonymized findings. Updated daily.
           </p>
           <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
-            <span className="inline-flex items-center rounded-full border border-foreground/15 bg-foreground/[0.04] px-2 py-1 font-mono text-foreground/70">
-              Last updated: {fmtUpdated(payload.stats.last_updated)} KST
-            </span>
+            <RelativeTime
+              iso={payload.stats.last_updated}
+              className="inline-flex items-center rounded-full border border-foreground/15 bg-foreground/[0.04] px-2 py-1 font-mono text-foreground/70"
+            />
           </div>
           <p className="mt-6 max-w-3xl text-sm text-foreground/55 italic leading-relaxed">
             Most x402 dashboards count transactions. We classify them.

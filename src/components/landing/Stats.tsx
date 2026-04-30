@@ -1,4 +1,5 @@
 import type { LandingStats } from "@/lib/stats";
+import { RelativeTime } from "@/components/common/RelativeTime";
 
 function fmtInt(n: number) {
   return new Intl.NumberFormat("en-US").format(n);
@@ -32,8 +33,9 @@ export function Stats({ stats }: { stats: LandingStats }) {
             </div>
           ))}
         </dl>
-        <p className="mt-10 text-xs text-foreground/40">
-          Refreshed every 60 seconds · last update {new Date(stats.last_updated).toUTCString()}
+        <p className="mt-10 text-xs text-foreground/40 inline-flex items-center gap-1.5">
+          <span>Refreshed every 60 seconds ·</span>
+          <RelativeTime iso={stats.last_updated} />
         </p>
       </div>
     </section>

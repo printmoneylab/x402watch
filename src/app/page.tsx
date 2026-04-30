@@ -1,12 +1,35 @@
-export default function Home() {
+import { Hero } from "@/components/landing/Hero";
+import { Stats, ProductLine } from "@/components/landing/Stats";
+import { Differentiators } from "@/components/landing/Differentiators";
+import { ChartGrid } from "@/components/landing/Charts";
+import { Footer } from "@/components/landing/Footer";
+import { fetchLandingPayload, FALLBACK } from "@/lib/stats";
+
+export const revalidate = 60;
+
+async function getPayload() {
+  try {
+    return await fetchLandingPayload();
+  } catch (err) {
+    console.error("[landing] live fetch failed, using fallback:", err);
+    return FALLBACK;
+  }
+}
+
+export default async function HomePage() {
+  const payload = await getPayload();
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-black px-6 text-center">
-      <h1 className="text-4xl font-semibold tracking-tight text-zinc-50 sm:text-6xl">
-        x402watch — Coming soon
-      </h1>
-      <p className="mt-6 max-w-xl text-base text-zinc-400 sm:text-lg">
-        Wash-filtered intelligence layer for x402
-      </p>
-    </main>
+    <>
+      <Hero />
+      <Stats stats={payload.stats} />
+      <ProductLine />
+      <Differentiators />
+      <ChartGrid
+        labels={payload.label_distribution}
+        series={payload.category_volume_series}
+        daily={payload.daily_new_services}
+      />
+      <Footer />
+    </>
   );
 }

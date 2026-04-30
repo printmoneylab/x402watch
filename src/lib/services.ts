@@ -89,7 +89,19 @@ export type ServiceFilters = {
   sort?: SortKey;
   order?: "asc" | "desc";
   page?: number;
+  per_page?: PerPage;
 };
+
+/** User-facing page-size options. The API uses `page_size`; the URL/UI
+ * label is `per_page`. Default is 24 — tighter than the API default (50)
+ * because mobile cards stack 1-wide and 50 is a long scroll. */
+export const PER_PAGE_OPTIONS = [12, 24, 50, 100] as const;
+export type PerPage = (typeof PER_PAGE_OPTIONS)[number];
+export const DEFAULT_PER_PAGE: PerPage = 24;
+
+export function isPerPage(n: unknown): n is PerPage {
+  return typeof n === "number" && (PER_PAGE_OPTIONS as readonly number[]).includes(n);
+}
 
 export const SORT_KEYS = [
   "tx_24h",
@@ -150,6 +162,9 @@ export function buildServicesQuery(f: ServiceFilters): string {
   if (f.order && f.order !== DEFAULT_ORDER_FOR_SORT[f.sort ?? "tx_24h"])
     p.set("order", f.order);
   if (f.page && f.page > 1) p.set("page", String(f.page));
+  // Always send page_size explicitly so that our default (24) wins over
+  // the API default (50) regardless of whether the user has chosen.
+  p.set("page_size", String(f.per_page ?? DEFAULT_PER_PAGE));
   return p.toString();
 }
 

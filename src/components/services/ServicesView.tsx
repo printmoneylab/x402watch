@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import {
   LayoutGrid,
@@ -20,10 +20,16 @@ import {
   SORT_KEYS,
   SORT_LABELS,
   DEFAULT_ORDER_FOR_SORT,
+  PER_PAGE_OPTIONS,
+  DEFAULT_PER_PAGE,
+  isPerPage,
+  type PerPage,
   type ServiceListPayload,
   type SortKey,
 } from "@/lib/services";
 import { cn } from "@/lib/utils";
+
+const PER_PAGE_STORAGE_KEY = "x402watch:services:per_page";
 
 type View = "grid" | "table";
 const VIEWS: View[] = ["grid", "table"];
@@ -64,7 +70,8 @@ export function ServicesView({
   const maxWashPct = sp.get("max_wash_pct") ?? "";
   const activeOnly = sp.get("active_only") === "true";
   const showPlaceholder = sp.get("show_placeholder") === "true";
-  const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+  const perPageRaw = parseInt(sp.get("per_page") ?? "", 10);
+  const perPage: PerPage = isPerPage(perPageRaw) ? perPageRaw : DEFAULT_PER_PAGE;
 
   // Local search input state to avoid URL update on every keystroke;
   // commits on Enter / blur via updateParams. Re-sync on URL changes
@@ -104,10 +111,47 @@ export function ServicesView({
     const sortNow = (next.get("sort") as SortKey) ?? DEFAULT_SORT;
     if (next.get("order") === DEFAULT_ORDER_FOR_SORT[sortNow]) next.delete("order");
     if (next.get("page") === "1") next.delete("page");
+    if (next.get("per_page") === String(DEFAULT_PER_PAGE)) next.delete("per_page");
 
     const qs = next.toString();
     setPending(true);
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+
+  // On mount, if the URL doesn't pin a per_page, apply the user's
+  // remembered preference from localStorage. Runs once; uses a ref guard
+  // so it survives re-renders without re-firing. Calls router.replace
+  // directly (rather than `update`) because `update` flips local state,
+  // which would be a setState-in-effect.
+  const didApplyStoredPerPageRef = useRef(false);
+  useEffect(() => {
+    if (didApplyStoredPerPageRef.current) return;
+    didApplyStoredPerPageRef.current = true;
+    if (sp.get("per_page")) return;
+    if (typeof window === "undefined") return;
+    const stored = window.localStorage.getItem(PER_PAGE_STORAGE_KEY);
+    if (!stored) return;
+    const parsed = parseInt(stored, 10);
+    if (!isPerPage(parsed) || parsed === DEFAULT_PER_PAGE) return;
+    const next = new URLSearchParams(sp.toString());
+    next.set("per_page", String(parsed));
+    next.delete("page");
+    router.replace(`${pathname}?${next.toString()}`, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handlePerPageChange = (next: PerPage) => {
+    if (typeof window !== "undefined") {
+      if (next === DEFAULT_PER_PAGE) {
+        window.localStorage.removeItem(PER_PAGE_STORAGE_KEY);
+      } else {
+        window.localStorage.setItem(PER_PAGE_STORAGE_KEY, String(next));
+      }
+    }
+    update(
+      { per_page: next === DEFAULT_PER_PAGE ? null : next },
+      { resetPage: true }
+    );
   };
 
   const reset = () => {
@@ -296,7 +340,7 @@ export function ServicesView({
       </div>
 
       {/* Sort + view toggle row */}
-      <div className="flex items-center gap-2 mb-4">
+      <div className="flex flex-wrap items-center gap-2 mb-4">
         <ArrowUpDown className="size-4 text-foreground/50" />
         <select
           value={sort}
@@ -320,7 +364,22 @@ export function ServicesView({
         >
           {order === "asc" ? <ArrowUp className="size-4" /> : <ArrowDown className="size-4" />}
         </button>
-        <div className="ml-auto inline-flex rounded-md border border-foreground/15 overflow-hidden">
+
+        <label className="ml-auto sm:ml-2 inline-flex items-center gap-1.5 text-xs text-foreground/55">
+          <span className="hidden sm:inline">Per page</span>
+          <select
+            value={perPage}
+            onChange={(e) => handlePerPageChange(Number(e.target.value) as PerPage)}
+            className="h-9 px-2 rounded-md bg-foreground/5 border border-foreground/15 text-sm font-mono text-foreground/85 focus:outline-none focus:ring-2 focus:ring-accent/40"
+            aria-label="Items per page"
+          >
+            {PER_PAGE_OPTIONS.map((n) => (
+              <option key={n} value={n}>{n}</option>
+            ))}
+          </select>
+        </label>
+
+        <div className="inline-flex rounded-md border border-foreground/15 overflow-hidden">
           <button
             type="button"
             onClick={() => update({ view: "grid" })}

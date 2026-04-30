@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { ServicesView } from "@/components/services/ServicesView";
 import {
   fetchServices,
+  isPerPage,
   type ServiceListPayload,
   type ServiceFilters,
   type SortKey,
@@ -37,6 +38,7 @@ function paramsToFilters(sp: Record<string, string | string[] | undefined>): Ser
   };
   const sort = get("sort");
   const order = get("order");
+  const perPageRaw = get("per_page") ? parseInt(get("per_page")!, 10) : undefined;
   return {
     search: get("search") || undefined,
     category: get("category") || undefined,
@@ -51,6 +53,7 @@ function paramsToFilters(sp: Record<string, string | string[] | undefined>): Ser
       : undefined,
     order: order === "asc" || order === "desc" ? order : undefined,
     page: get("page") ? Math.max(1, parseInt(get("page")!, 10) || 1) : undefined,
+    per_page: isPerPage(perPageRaw) ? perPageRaw : undefined,
   };
 }
 

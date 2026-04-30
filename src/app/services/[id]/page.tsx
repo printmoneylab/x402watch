@@ -202,12 +202,10 @@ export default async function ServiceDetailPage({
                 self-test, suspected_wash, and developer traffic.
               </p>
               <Link
-                href="https://github.com/printmoneylab/x402watch/blob/main/docs/wash-filter-methodology.md"
-                target="_blank"
-                rel="noopener noreferrer"
+                href="/docs/methodology"
                 className="text-foreground/85 hover:text-foreground inline-flex items-center gap-1 underline underline-offset-2"
               >
-                Read the methodology <ExternalLink className="size-3.5" />
+                Read the methodology
               </Link>
             </div>
           </div>

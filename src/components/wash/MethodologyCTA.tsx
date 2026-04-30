@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { ArrowRight, ExternalLink } from "lucide-react";
 
-const METHODOLOGY_URL =
-  "https://github.com/printmoneylab/x402watch/blob/main/docs/wash-filter-methodology.md";
+const METHODOLOGY_URL = "/docs/methodology";
 const DISPUTE_URL =
   "https://github.com/printmoneylab/x402watch/issues/new";
 
@@ -42,8 +41,6 @@ export function MethodologyCTA() {
       <div className="mt-6 flex flex-col sm:flex-row gap-3">
         <Link
           href={METHODOLOGY_URL}
-          target="_blank"
-          rel="noopener noreferrer"
           className="inline-flex items-center gap-1.5 h-10 px-4 rounded-md border border-foreground/20 bg-foreground/[0.06] text-sm font-medium text-foreground hover:bg-foreground/10 transition-colors"
         >
           Read full methodology

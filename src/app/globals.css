@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 :root {
   /* Dark theme by default — matches DefiLlama / Linear / Vercel data-tool aesthetic. */

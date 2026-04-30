@@ -65,7 +65,7 @@ Each x402 buyer is classified into one of 8 mutually-exclusive labels:
 ## Wash Detection Methodology
 
 Cohort signals + vanity clustering + concentration analysis.
-Full methodology: https://github.com/printmoneylab/x402watch/blob/main/docs/wash-filter-methodology.md
+Full methodology: ${SITE_URL}/docs/methodology
 
 ## Data Updates
 

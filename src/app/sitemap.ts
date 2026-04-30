@@ -37,6 +37,12 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       changeFrequency: "daily",
       priority: 0.9,
     },
+    {
+      url: `${SITE_URL}/docs/methodology`,
+      lastModified,
+      changeFrequency: "monthly",
+      priority: 0.8,
+    },
   ];
 
   // Append per-category detail pages (best-effort; degrade silently if API down)

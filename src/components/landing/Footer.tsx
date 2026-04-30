@@ -25,10 +25,8 @@ export function Footer() {
 
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
           <Link
-            href="https://github.com/printmoneylab/x402watch/blob/main/docs/wash-filter-methodology.md"
+            href="/docs/methodology"
             className="text-foreground/65 hover:text-foreground"
-            target="_blank"
-            rel="noopener noreferrer"
           >
             Methodology
           </Link>

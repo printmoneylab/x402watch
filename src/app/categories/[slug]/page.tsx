@@ -145,9 +145,7 @@ export default async function CategoryDetailPage({
         <div className="mx-auto max-w-6xl px-6 py-10 sm:py-12 text-sm text-foreground/55">
           How are these labels calculated?{" "}
           <Link
-            href="https://github.com/printmoneylab/x402watch/blob/main/docs/wash-filter-methodology.md"
-            target="_blank"
-            rel="noopener noreferrer"
+            href="/docs/methodology"
             className="text-foreground/80 hover:text-foreground underline underline-offset-2"
           >
             Read the methodology →

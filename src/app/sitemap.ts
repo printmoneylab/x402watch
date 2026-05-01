@@ -43,6 +43,12 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       changeFrequency: "monthly",
       priority: 0.8,
     },
+    {
+      url: `${SITE_URL}/api`,
+      lastModified,
+      changeFrequency: "weekly",
+      priority: 0.8,
+    },
   ];
 
   // Append per-category detail pages (best-effort; degrade silently if API down)

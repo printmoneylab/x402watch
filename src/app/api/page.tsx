@@ -417,10 +417,73 @@ async with x402HttpxClient(account=acct, base_url="https://api.x402.printmoneyla
             </li>
             <li className="flex gap-2">
               <span className="text-foreground/40 font-mono">·</span>
-              <span className="font-mono text-foreground/55">MCP server</span>
-              <span className="text-foreground/45">— rolling out (Phase 1)</span>
+              <Link
+                href="https://api.x402.printmoneylab.com/mcp"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-foreground/85 hover:text-foreground underline underline-offset-2"
+              >
+                MCP server
+              </Link>
+              <span className="text-foreground/55">
+                — live at{" "}
+                <code className="font-mono text-foreground/70">
+                  https://api.x402.printmoneylab.com/mcp
+                </code>
+              </span>
             </li>
           </ul>
+
+          <div className="mt-8 rounded-lg border border-foreground/10 bg-foreground/[0.02] p-5">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <h3 className="text-base font-semibold tracking-tight text-foreground">
+                MCP server
+              </h3>
+              <span className="inline-flex items-center rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wide text-emerald-300">
+                live
+              </span>
+              <span className="ml-auto font-mono text-[11px] text-foreground/45">
+                streamable-http · MCP 2025-06-18
+              </span>
+            </div>
+            <p className="text-sm text-foreground/65 leading-relaxed">
+              Five read-only tools wrapping the public free endpoints. Per-address
+              wash analysis is the paid HTTP endpoint{" "}
+              <code className="font-mono text-foreground/80">POST /api/v1/wash/check</code>{" "}
+              — the MCP <code className="font-mono text-foreground/80">x402_check_wash</code> tool
+              returns aggregate data and a pointer.
+            </p>
+
+            <ul className="mt-4 space-y-1.5 text-sm">
+              {[
+                ["x402_get_categories", "All 33 x402 service categories with stats"],
+                ["x402_get_service", "Service detail with label distribution"],
+                ["x402_check_wash", "Aggregate wash report (per-address via paid /wash/check)"],
+                ["x402_search_services", "Search 36k+ services with filters"],
+                ["x402_get_trends", "24h trends, hot services, category movers"],
+              ].map(([name, desc]) => (
+                <li key={name} className="flex gap-2">
+                  <span className="text-foreground/40 font-mono">·</span>
+                  <code className="font-mono text-foreground/85 shrink-0">{name}</code>
+                  <span className="text-foreground/55">— {desc}</span>
+                </li>
+              ))}
+            </ul>
+
+            <p className="mt-5 text-[11px] uppercase tracking-wide text-foreground/45 mb-1.5">
+              Connect via Claude Desktop, Cursor, or any MCP client
+            </p>
+            <CodeBlock lang="json">
+{`{
+  "mcpServers": {
+    "x402watch": {
+      "transport": "streamable-http",
+      "url": "https://api.x402.printmoneylab.com/mcp"
+    }
+  }
+}`}
+            </CodeBlock>
+          </div>
         </div>
       </section>
 

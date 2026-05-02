@@ -473,7 +473,7 @@ async with x402HttpxClient(account=acct, base_url="https://api.x402.printmoneyla
             <div className="mt-6 rounded-md border border-foreground/15 bg-foreground/[0.04] p-4">
               <div className="flex flex-wrap items-baseline gap-2 mb-2">
                 <Link
-                  href="https://smithery.ai/server/@bakyang2/x402watch"
+                  href="https://smithery.ai/servers/bakyang2/x402watch"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-base font-semibold tracking-tight text-foreground hover:text-accent inline-flex items-center gap-1.5"
@@ -486,7 +486,7 @@ async with x402HttpxClient(account=acct, base_url="https://api.x402.printmoneyla
                 </span>
               </div>
               <CodeBlock lang="bash">
-{`smithery mcp add @bakyang2/x402watch`}
+{`smithery mcp add bakyang2/x402watch`}
               </CodeBlock>
             </div>
 

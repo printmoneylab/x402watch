@@ -67,6 +67,13 @@ Each x402 buyer is classified into one of 8 mutually-exclusive labels:
 Cohort signals + vanity clustering + concentration analysis.
 Full methodology: ${SITE_URL}/docs/methodology
 
+## MCP Server
+
+- Endpoint: ${API_BASE.replace("/api/v1", "")}/mcp (transport: streamable-http)
+- Registry: https://registry.modelcontextprotocol.io
+- Server name: io.github.printmoneylab/x402watch
+- Smithery: https://smithery.ai/servers/bakyang2/x402watch
+
 ## Data Updates
 
 - Service indexing: hourly

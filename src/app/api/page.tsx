@@ -470,8 +470,28 @@ async with x402HttpxClient(account=acct, base_url="https://api.x402.printmoneyla
               ))}
             </ul>
 
+            <div className="mt-6 rounded-md border border-foreground/15 bg-foreground/[0.04] p-4">
+              <div className="flex flex-wrap items-baseline gap-2 mb-2">
+                <Link
+                  href="https://smithery.ai/server/@bakyang2/x402watch"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-base font-semibold tracking-tight text-foreground hover:text-accent inline-flex items-center gap-1.5"
+                >
+                  Available on Smithery
+                  <ExternalLink className="size-3.5" />
+                </Link>
+                <span className="text-xs text-foreground/55">
+                  one-command install for any MCP client
+                </span>
+              </div>
+              <CodeBlock lang="bash">
+{`smithery mcp add @bakyang2/x402watch`}
+              </CodeBlock>
+            </div>
+
             <p className="mt-5 text-[11px] uppercase tracking-wide text-foreground/45 mb-1.5">
-              Connect via Claude Desktop, Cursor, or any MCP client
+              Or connect manually via Claude Desktop, Cursor, or any MCP client
             </p>
             <CodeBlock lang="json">
 {`{

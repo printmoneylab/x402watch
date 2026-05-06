@@ -6,10 +6,44 @@
  * The endpoint silently falls back to a console log when KV isn't configured
  * (local dev without the env vars set).
  */
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { kv } from "@vercel/kv";
 
 export const runtime = "nodejs";
+
+async function notifyTelegram(
+  record: { email: string; useCase: string | null; signed_up_at: string },
+  total: number
+): Promise<void> {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chat = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chat) {
+    console.warn("[waitlist] telegram env vars missing — skipping notify");
+    return;
+  }
+  const text = [
+    "📋 New x402watch wait list signup",
+    `Email: ${record.email}`,
+    `Use case: ${record.useCase || "(none)"}`,
+    `Total signups: ${total}`,
+  ].join("\n");
+  try {
+    const r = await fetch(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chat, text }),
+        signal: AbortSignal.timeout(5000),
+      }
+    );
+    if (!r.ok) {
+      console.error("[waitlist] telegram non-200:", r.status, await r.text());
+    }
+  } catch (err) {
+    console.error("[waitlist] telegram failed:", err);
+  }
+}
 
 type Body = { email?: unknown; useCase?: unknown };
 
@@ -65,6 +99,10 @@ export async function POST(req: Request): Promise<Response> {
     await kv.set(key, record);
     // Maintain a simple set of emails for export later. Capped index.
     await kv.sadd("waitlist:index", email);
+    const total = (await kv.scard("waitlist:index")) ?? 0;
+    // Telegram notify runs after the response is sent so the form
+    // doesn't wait on the upstream HTTPS round-trip.
+    after(() => notifyTelegram(record, total));
     return NextResponse.json({ ok: true, duplicate: false });
   } catch (err) {
     console.error("[waitlist] KV write failed:", err);

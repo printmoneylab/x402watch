@@ -165,10 +165,11 @@ export default function PricingPage() {
                 When does Pro launch?
               </summary>
               <p className="text-foreground/65 leading-relaxed">
-                We&apos;re building toward Day 26 launch and prioritising what
-                wait list signups actually ask for. Wait listers get an email
-                with the launch date, the early-access pricing, and a private
-                onboarding link before the public announcement.
+                We&apos;re targeting an initial Pro launch in the coming
+                weeks, prioritising what wait list signups actually ask for.
+                Wait listers will be notified by email — with the
+                early-access pricing and a private onboarding link — before
+                the public announcement.
               </p>
             </details>
             <details className="group rounded-md border border-foreground/10 bg-foreground/[0.02] p-4">
@@ -176,10 +177,10 @@ export default function PricingPage() {
                 What does early access include?
               </summary>
               <p className="text-foreground/65 leading-relaxed">
-                Lifetime 50% off the public Pro price for first-wave signups
-                (no member cap; window closes one week after Day 26 launch).
-                Same feature set as later tiers, just locked in at the
-                early-access rate.
+                Early-access 50% off pricing for first-wave wait list
+                signups, plus a private onboarding link sent before the
+                public launch. Same feature set as the public Pro tier,
+                locked in at the early-access rate.
               </p>
             </details>
             <details className="group rounded-md border border-foreground/10 bg-foreground/[0.02] p-4">

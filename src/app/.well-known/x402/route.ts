@@ -22,6 +22,17 @@ export function GET() {
       "/api/v1/trends",
       "/api/v1/wash-report",
     ],
+    paid_endpoints: [
+      "GET /api/v1/services/{id}/wash-detail",
+      "GET /api/v1/buyers/{address}/profile",
+      "GET /api/v1/services/{id}/transactions",
+      "GET /api/v1/categories/{slug}/full-history",
+      "POST /api/v1/wash/check",
+    ],
+    networks: [
+      { name: "Base", caip2: "eip155:8453", asset: "USDC" },
+      { name: "Solana", caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", asset: "USDC SPL" },
+    ],
   };
 
   return NextResponse.json(manifest, {

@@ -17,3 +17,6 @@ id = "2086e0cb0d9348cd9f1365443c58b7ac"
 # [[env.preview.kv_namespaces]]
 # binding = "WAITLIST_KV"
 # id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+
+[vars]
+NEXT_PUBLIC_X402WATCH_API = "https://api.x402.printmoneylab.com/api/v1"

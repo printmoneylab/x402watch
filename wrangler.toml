@@ -9,7 +9,7 @@ pages_build_output_dir = ".vercel/output/static"
 # copy the namespace id, paste it below.
 [[kv_namespaces]]
 binding = "WAITLIST_KV"
-id = "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID"
+id = "2086e0cb0d9348cd9f1365443c58b7ac"
 
 # Optional preview namespace for branch deploys. Leave the id blank
 # until you create a separate preview namespace; preview deploys will

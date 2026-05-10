@@ -13,6 +13,8 @@ import { fetchCategories } from "@/lib/categories";
 import { JsonLd } from "@/components/common/JsonLd";
 import { datasetSchema, SITE_URL, API_BASE } from "@/lib/jsonld";
 
+export const runtime = "edge";
+
 export const revalidate = 300;
 
 export const metadata: Metadata = {

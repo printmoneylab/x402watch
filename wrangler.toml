@@ -1,0 +1,19 @@
+name = "x402watch"
+compatibility_date = "2025-05-10"
+compatibility_flags = ["nodejs_compat"]
+pages_build_output_dir = ".vercel/output/static"
+
+# Cloudflare Workers KV — replaces Upstash/Vercel KV.
+# Production binding. Create the namespace in the CF dashboard
+# (Workers & Pages → KV → Create namespace, name: x402watch-waitlist),
+# copy the namespace id, paste it below.
+[[kv_namespaces]]
+binding = "WAITLIST_KV"
+id = "REPLACE_WITH_PRODUCTION_KV_NAMESPACE_ID"
+
+# Optional preview namespace for branch deploys. Leave the id blank
+# until you create a separate preview namespace; preview deploys will
+# share the production binding for now.
+# [[env.preview.kv_namespaces]]
+# binding = "WAITLIST_KV"
+# id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"

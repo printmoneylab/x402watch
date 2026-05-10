@@ -1,22 +1,36 @@
 /**
  * POST /api/waitlist — Pro-tier wait list collector.
  *
- * Stored under `waitlist:<lower_email>` in Vercel KV. Re-submits return 200
- * with `duplicate: true` so we don't leak whether an address is on the list.
- * The endpoint silently falls back to a console log when KV isn't configured
- * (local dev without the env vars set).
+ * Stored in Cloudflare Workers KV under `waitlist:<lower_email>`.
+ * Re-submits return 200 with `duplicate: true` so we don't leak whether
+ * an address is on the list. Telegram notification fires after the
+ * response via next/server's after().
+ *
+ * Migrated from Vercel KV (Upstash) — KV is now a CF Workers binding
+ * accessed via @cloudflare/next-on-pages getRequestContext().
  */
 import { NextResponse, after } from "next/server";
-import { kv } from "@vercel/kv";
+import { getRequestContext } from "@cloudflare/next-on-pages";
 
-export const runtime = "nodejs";
+export const runtime = "edge";
+
+type Body = { email?: unknown; useCase?: unknown };
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_USE_CASE = 280;
+
+function clean(s: unknown, max: number): string {
+  if (typeof s !== "string") return "";
+  return s.trim().slice(0, max);
+}
 
 async function notifyTelegram(
+  env: CloudflareEnv,
   record: { email: string; useCase: string | null; signed_up_at: string },
   total: number
 ): Promise<void> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chat = process.env.TELEGRAM_CHAT_ID;
+  const token = env.TELEGRAM_BOT_TOKEN;
+  const chat = env.TELEGRAM_CHAT_ID;
   if (!token || !chat) {
     console.warn("[waitlist] telegram env vars missing — skipping notify");
     return;
@@ -45,16 +59,6 @@ async function notifyTelegram(
   }
 }
 
-type Body = { email?: unknown; useCase?: unknown };
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const MAX_USE_CASE = 280;
-
-function clean(s: unknown, max: number): string {
-  if (typeof s !== "string") return "";
-  return s.trim().slice(0, max);
-}
-
 export async function POST(req: Request): Promise<Response> {
   let body: Body = {};
   try {
@@ -80,29 +84,33 @@ export async function POST(req: Request): Promise<Response> {
     signed_up_at: new Date().toISOString(),
   };
 
-  // Best-effort KV write. If KV isn't configured (no env vars), log so the
-  // operator notices but still succeed to the user — they shouldn't see infra
-  // gaps as "submission failed."
-  const kvConfigured =
-    !!process.env.KV_REST_API_URL && !!process.env.KV_REST_API_TOKEN;
+  let env: CloudflareEnv;
+  try {
+    env = getRequestContext().env;
+  } catch (err) {
+    // Local dev outside `wrangler pages dev` — log + succeed without persist.
+    console.warn("[waitlist] no Cloudflare context:", err);
+    return NextResponse.json({ ok: true, persisted: false });
+  }
 
-  if (!kvConfigured) {
-    console.warn("[waitlist] KV not configured — skipping persist", record);
+  if (!env.WAITLIST_KV) {
+    console.warn("[waitlist] WAITLIST_KV binding missing — skipping persist");
     return NextResponse.json({ ok: true, persisted: false });
   }
 
   try {
-    const existing = await kv.get(key);
-    if (existing) {
+    const existing = await env.WAITLIST_KV.get(key);
+    if (existing !== null) {
       return NextResponse.json({ ok: true, duplicate: true });
     }
-    await kv.set(key, record);
-    // Maintain a simple set of emails for export later. Capped index.
-    await kv.sadd("waitlist:index", email);
-    const total = (await kv.scard("waitlist:index")) ?? 0;
-    // Telegram notify runs after the response is sent so the form
-    // doesn't wait on the upstream HTTPS round-trip.
-    after(() => notifyTelegram(record, total));
+    await env.WAITLIST_KV.put(key, JSON.stringify(record));
+
+    // Lightweight count via KV list. Limited to 1000 per page; for the
+    // notification we just want a ballpark, so stop at the first page.
+    const list = await env.WAITLIST_KV.list({ prefix: "waitlist:", limit: 1000 });
+    const total = list.keys.length;
+
+    after(() => notifyTelegram(env, record, total));
     return NextResponse.json({ ok: true, duplicate: false });
   } catch (err) {
     console.error("[waitlist] KV write failed:", err);

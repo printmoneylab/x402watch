@@ -17,6 +17,7 @@ import {
   API_BASE,
 } from "@/lib/jsonld";
 
+export const runtime = "edge";
 export const revalidate = 300;
 // Don't pre-render at build time — 36k services is too many.
 export const dynamicParams = true;

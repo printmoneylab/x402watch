@@ -4,7 +4,6 @@ import { notFound } from "next/navigation";
 import { ChevronLeft } from "lucide-react";
 import {
   fetchCategoryDetail,
-  fetchCategories,
   prettyCategory,
 } from "@/lib/categories";
 import {
@@ -16,16 +15,11 @@ import { TopServicesTable } from "@/components/categories/TopServicesTable";
 import { JsonLd } from "@/components/common/JsonLd";
 import { datasetSchema, SITE_URL, API_BASE } from "@/lib/jsonld";
 
-export const revalidate = 300;
-
-export async function generateStaticParams() {
-  try {
-    const list = await fetchCategories();
-    return list.categories.map((c) => ({ slug: c.category }));
-  } catch {
-    return [];
-  }
-}
+// Edge runtime + dynamic rendering on Cloudflare Pages — no
+// generateStaticParams (Pages can't precompute the full set on edge,
+// and the backend's 5-min Redis cache absorbs the per-request cost).
+export const runtime = "edge";
+export const dynamic = "force-dynamic";
 
 export async function generateMetadata({
   params,

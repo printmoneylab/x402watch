@@ -1,3 +1,5 @@
+"use client";
+
 /**
  * LabelBadge — single source of truth for rendering a buyer label in the
  * dashboard. Reads confidence and degrades the visual:
@@ -5,16 +7,18 @@
  *   0.70+   → "likely …" with a ⚠ disclaimer link
  *   < 0.70  → "unlabeled" (treated as no-decision)
  *
- * Optional `reason` is exposed via `title` for hover (desktop) and a
- * <details> summary for tap-able expansion on mobile. The "Report
- * incorrect label" button surfaces on self_test / suspected_wash only
- * (Layer 4 dispute UI; backend lands in Step 6, so the button currently
- * deep-links to a pre-filled GitHub Issue).
+ * Optional `reason` is exposed via `title` for hover (desktop).
+ * The "Report incorrect label" Flag button surfaces on self_test /
+ * suspected_wash only. It opens the in-page ReportDialog (Layer 4
+ * dispute UI talking to /api/disputes). The dialog footer keeps a
+ * GitHub Issue fallback for users who prefer the public channel.
  */
+import { useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, Flag } from "lucide-react";
 import { LABEL_COLOR_TW } from "@/lib/categories";
 import { cn } from "@/lib/utils";
+import { ReportDialog } from "@/components/common/ReportDialog";
 
 export type BuyerLabel =
   | "organic_user"
@@ -46,7 +50,7 @@ const REPORT_BASE =
   encodeURIComponent("Label dispute") +
   "&body=";
 
-function reportUrl(opts: {
+function githubReportUrl(opts: {
   label: BuyerLabel;
   buyer?: string;
   seller?: string;
@@ -91,6 +95,8 @@ export function LabelBadge({
   buyerAddress?: string;
   sellerAddress?: string;
 }) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+
   const effective: BuyerLabel =
     (label as BuyerLabel) && label !== "" ? (label as BuyerLabel) : "unlabeled";
   const conf = typeof confidence === "number" ? confidence : null;
@@ -114,7 +120,9 @@ export function LabelBadge({
   }
 
   const showsReport =
-    showReport && (effective === "self_test" || effective === "suspected_wash");
+    showReport &&
+    !!buyerAddress &&
+    (effective === "self_test" || effective === "suspected_wash");
 
   const sizeCls =
     size === "md"
@@ -143,21 +151,35 @@ export function LabelBadge({
         </Link>
       )}
       {showsReport && (
-        <Link
-          href={reportUrl({
-            label: effective,
-            buyer: buyerAddress,
-            seller: sellerAddress,
-            reason: reason ?? undefined,
-          })}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label="Report this label"
-          title="Report this label as incorrect"
-          className="text-foreground/40 hover:text-rose-300"
-        >
-          <Flag className="size-3" />
-        </Link>
+        <>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDialogOpen(true);
+            }}
+            aria-label="Report this label as incorrect"
+            title="Report this label as incorrect"
+            className="text-foreground/40 hover:text-rose-300 transition-colors"
+          >
+            <Flag className="size-3" />
+          </button>
+          <ReportDialog
+            open={dialogOpen}
+            onClose={() => setDialogOpen(false)}
+            buyerAddress={buyerAddress!}
+            sellerAddress={sellerAddress}
+            currentLabel={effective}
+            currentConfidence={conf}
+            githubFallbackUrl={githubReportUrl({
+              label: effective,
+              buyer: buyerAddress,
+              seller: sellerAddress,
+              reason: reason ?? undefined,
+            })}
+          />
+        </>
       )}
     </span>
   );

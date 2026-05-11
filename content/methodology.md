@@ -159,14 +159,17 @@ We list these openly because they're more useful disclosed than hidden:
 
 ## 6. Dispute process
 
-Labels are public-facing numbers that move money (low `real_volume_pct` will lose marketing pull). We treat disputes as a first-class feature:
+Labels are public-facing numbers that move money (low `real_volume_pct` will lose marketing pull). Disputes are a first-class feature, not an afterthought:
 
-- **Report-incorrect-label button** on `self_test` and `suspected_wash` badges. Opens a pre-filled GitHub Issue with buyer / seller / label / reason fields so we can triage and reproduce.
-- **Operator whitelist intake.** If you operate a service and the dispute is "those are our own test wallets", send a signed message from the seller wallet to `data/owner_wallets.json`. Verified wallets get the `owner_test` label permanently.
-- **Backend dispute API (Phase 2).** A `POST /api/disputes` endpoint with a `dispute → re-label` audit log is the planned next step. Until then, GitHub Issues is the system of record.
-- **Re-evaluation cadence.** Daily labeller run picks up any whitelist or override changes within 24h. Backfill on demand if a dispute is time-sensitive.
+- **Report-incorrect-label button** on `self_test` and `suspected_wash` badges. Opens an in-page dispute dialog that submits to `POST /api/disputes`. Required fields: a 32-1000 character reason; optional fields: your wallet address (for the audit log). A GitHub Issue link is kept as a secondary public channel inside the dialog footer.
+- **Public API.**
+  - `POST /api/disputes` — submit a dispute (rate-limited: 10 / IP / hour, 1 / IP / buyer / 24h, ≥ 50 / hour → 24h ban).
+  - `GET /api/disputes/buyer/{address}` — public counts (`total`, `pending`, `reviewed`, `resolved`, `rejected`) so anyone can audit how often a wallet has been challenged.
+- **Auto-recompute trigger.** When ≥ 5 independent reports pile up on one buyer, the buyer is added to `recompute_queue`. The next daily labeller run drains the queue, compares the new label to each dispute's snapshot, and closes the dispute as `resolved` (label changed) or `reviewed` (no change). Resolutions land in `label_disputes.resolution_note` for full traceability.
+- **Operator whitelist intake.** If your dispute is "those are our own test wallets", send a signed message from the seller wallet so we can add it to `data/owner_wallets.json`. Verified wallets get the `owner_test` label permanently.
+- **Re-evaluation cadence.** Daily labeller run picks up whitelist changes and processes the recompute queue within 24h. Backfill on demand if a dispute is time-sensitive.
 
-We will not silently rewrite labels in response to disputes — every change is committed to the `buyer_labels` hypertable with an audit reason, and the changelog at the top of this document tracks methodology-level shifts.
+We will not silently rewrite labels in response to disputes — every change is committed to the `buyer_labels` hypertable with an audit reason, the dispute carries its own row in `label_disputes`, and the changelog at the top of this document tracks methodology-level shifts.
 
 ---
 
@@ -214,6 +217,35 @@ SELECT create_hypertable('buyer_labels', 'time');
 
 We write **only on label change** (or confidence shift ≥ 0.10). Most buyers' labels are stable across days; the hypertable stays small and historical reads stay fast.
 
+### `label_disputes` and `recompute_queue` (Step 6)
+
+```sql
+CREATE TABLE label_disputes (
+    id                 SERIAL PRIMARY KEY,
+    buyer_address      TEXT NOT NULL,
+    seller_address     TEXT,
+    reporter_address   TEXT,
+    reporter_ip        TEXT,
+    reason             TEXT NOT NULL CHECK (char_length(reason) BETWEEN 32 AND 1000),
+    current_label      TEXT NOT NULL,
+    current_confidence NUMERIC(3,2),
+    status             TEXT NOT NULL DEFAULT 'pending',
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at        TIMESTAMPTZ,
+    resolution_note    TEXT
+);
+
+CREATE TABLE recompute_queue (
+    buyer_address TEXT PRIMARY KEY,
+    triggered_by  INTEGER REFERENCES label_disputes(id) ON DELETE SET NULL,
+    pending_count INTEGER NOT NULL DEFAULT 1,
+    added_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at  TIMESTAMPTZ
+);
+```
+
+A unique index `(buyer_address, COALESCE(reporter_address,''), COALESCE(reporter_ip,''), date_trunc('day', created_at))` enforces "one dispute per reporter per buyer per day" at the database layer, regardless of what the proxy did. The frontend's KV rate limiter is a fast filter; the DB index is the source of truth.
+
 ### Service rollups in `services`
 
 ```sql
@@ -245,6 +277,22 @@ Daily at KST 09:00 (UTC 00:00) via systemd timer on the Oracle ARM box. The full
 3. **`ai_agent` vs `organic_user` boundary.** Both are real-volume-positive, so the split matters less for headline numbers than for category-mix reporting.
 4. **Suspected_wash without graph features.** v2.0 ships without NetworkX cycle detection at scale; only structural cohort signals are wired into Layer 1. Cycle detection is a follow-up.
 5. **Solana labelling lag.** Solana addresses aren't hex; the vanity-cluster prefix/suffix heuristics from v1.x EVM logic are disabled on Solana pairs pending a base58-aware reimplementation.
+
+---
+
+## 10. Phase 2 roadmap
+
+Items the v2.0 ship deliberately left for later:
+
+1. **Buyer profile pages** (`/buyers/{address}`) — global label + confidence + per-pair breakdown table + dispute count. Needs a new public `GET /api/v1/buyers/{address}` endpoint on Oracle that joins `buyer_labels` + `buyer_seller_labels` + `label_disputes`. UI is straightforward once the endpoint lands.
+2. **Admin disputes dashboard** (`/admin/disputes`) — moderation UI in front of `GET /api/v1/internal/disputes/list`. Status transitions (`pending → reviewed/resolved/rejected`) with a resolution_note input.
+3. **Wallet-signed dispute attribution.** Today a reporter wallet is supplied freely. Phase 2 challenges the reporter to sign a nonce so dispute authorship is verifiable on-chain and `data/owner_wallets.json` self-service adds become possible.
+4. **Cross-chain identity linking** — ENS / CB Smart Wallet to merge per-chain buyer rows into a single global profile.
+5. **Solana vanity heuristics** — base58-aware prefix/suffix tier so Solana pairs get the same Layer 1 / Layer 2 treatment as EVM pairs.
+6. **NetworkX cycle detection at scale.** v2.0 ships without it; pre-compute per-seller subgraphs once a day rather than at query time.
+7. **Dispute-driven algorithm tuning.** When a buyer accumulates ≥ N `resolved` (label-changed) disputes against the *same* `current_label`, that's a signal the algorithm has a systematic bias for that label. Track and surface in the methodology changelog.
+
+Phase 2 work is *non-blocking* for the v2.0 announcement — the algorithm and dispute submission already work end-to-end.
 
 ---
 

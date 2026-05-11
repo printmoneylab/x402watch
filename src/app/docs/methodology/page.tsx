@@ -17,7 +17,7 @@ export const revalidate = 3600;
 export const metadata: Metadata = {
   title: "Wash Filter Methodology — x402watch",
   description:
-    "Open methodology behind x402watch's wash detection: 8-label classification, cohort signals, vanity clustering. Version-controlled, reproducible.",
+    "Open methodology behind x402watch's wash detection: 4-layer pipeline, 9-label taxonomy, confidence bands. Version-controlled, reproducible.",
 };
 
 function readMethodologyMarkdown(): string {
@@ -38,7 +38,7 @@ export default function MethodologyPage() {
         data={articleSchema({
           headline: "x402watch Wash Filter Methodology",
           description:
-            "Open methodology — 8-label classification, cohort signals, vanity clustering, conservative developer label.",
+            "Open methodology — four-layer pipeline, nine-label taxonomy, confidence bands, conservative defaults.",
           url: `${SITE_URL}/docs/methodology`,
           datePublished: updatedIso,
         })}

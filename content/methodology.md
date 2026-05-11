@@ -1,34 +1,46 @@
 # x402watch — Wash-Filter Methodology
 
-**Version:** v1.1 (Day 9, 2026-04-30)
-**Status:** Phase 1 in production (`indexer/labeller.py`, daily systemd timer at KST 09:30).
+**Version:** v2.0 (2026-04-30)
+**Status:** Production. Four-layer pipeline running daily on Oracle ARM (`indexer/seller_flags.py` → `indexer/pair_labels.py` → `indexer/derive_global.py`).
 **Owner:** PrintMoneyLab
-**Context:** x402 ecosystem analytics. We separate "real demand" from artificial / self-generated traffic and report it transparently per service.
+**Context:** x402 ecosystem analytics. We separate real demand from artificial / self-generated traffic and report it transparently per service.
 
-**Changelog**
-- **v1.2 (2026-04-30, afternoon):** Reclassified 5 worst-performing categories (`search_engine`, `storage`, `news`, `okr_productivity`, `media_database`) under v1.1 prompt. End-state cross-LLM agreement settled at **78.9%** on a fresh 199-sample stratified validation. The post-reclassify number is *lower* than v1.1's 81.4% peak because Sonnet-4.5's stricter v1.1 prompt now routes more services to `other` for the categories that *weren't* re-classified (notably `authentication`, `content_generation`, `blockchain_infra`); achieving an 85%+ ceiling requires a full ~12,500-distinct re-classification with v1.1 prompt (~$2 spend) — deferred. Stable headline accuracy: **~80% Haiku-vs-Sonnet agreement on substantive categories**.
-- **v1.1 (2026-04-30, morning):** Added 4 seller-cohort wash-farm signals (uniform_amount, coordinated_start, uniform_tx_count, time_burst). Sharpened the self_test vs suspected_wash boundary by cohort size. Validated against aubr.ai (sybil farm) and KR Crypto (small-cohort self-test) on production data. Category-classification prompt tightened on weak boundaries (media_database vs entertainment_media, content_generation vs ai_inference, agent_payments vs defi_data, business_intelligence vs scientific_data); cross-LLM agreement rose from 73.9% to 81.4% on 200 stratified samples (Haiku 4.5 vs Sonnet 4.5 reference).
-- **v1.0 (2026-04-29):** Initial 8-label taxonomy. Single-buyer signals only. Production deployment.
-
-## Category-classification accuracy (Haiku 4.5 production, Sonnet 4.5 reference)
-
-| Round | Prompt version | Sample size | Overall agreement | Strongest categories | Weakest categories |
-|---|---|---:|---:|---|---|
-| 1 (Day 9) | v1.0 | 199 | 73.9% | financial_data, e_commerce, transport_logistics (100%) | media_database, agent_payments (0%); content_generation, agent_communication (25%) |
-| 2 (Day 9) | v1.1 (4 boundary clarifications) | 199 | **81.4%** | business_intelligence, ai_inference, entertainment_media (100%) | search_engine (0%) — Sonnet now routes to `other` |
-| 3 (Day 10) | v1.1 + 5 weak categories re-classified | 199 | 78.9% | okr_productivity, wallet_analytics, e_commerce, agent_payments, token_safety (100%) | authentication (14%), search_engine, storage (25%) |
-
-**Weakest categories shared across rounds**: `search_engine`, `storage`, `news`, `authentication`. These represent real category-boundary ambiguity that the prompt alone can't fully fix; humans would also disagree on edge cases. Phase 2 will explore (a) reclassifying *all* services under v1.1 prompt for symmetric measurement, and (b) consolidating overlapping categories where appropriate (e.g. `search_engine` ↔ `ai_search`).
-
-**Publishable headline**: *"AI category classification: ~80% cross-LLM agreement on substantive categories (Haiku 4.5 vs Sonnet 4.5 reference; n=199 stratified). Weakest categories surfaced and listed for transparency."*
+**Core principle.** *Calling honest traffic fraudulent is worse than missing fraud.* We bias toward false negatives. Strong public labels (`suspected_wash`, `self_test`) require multiple independent signals and survive global-context guards. Anything below `confidence = 0.70` is shown as **unlabeled**.
 
 ---
 
-## 1. Why this exists
+## Changelog
 
-Public x402 dashboards (Coinbase Bazaar, x402scan) report raw transaction counts.
-For analytics this is a misleading headline number, because the same transaction
-counter responds identically to:
+- **v2.0 (2026-04-30) — four-layer redesign.** Replaced the single-pass global-buyer labeller with a four-layer pipeline: (1) per-seller flags, (2) per-(buyer, seller) pair labels, (3) multi-signal weighting with global guards, (4) global buyer labels derived from pair labels. Adds a 9th label `owner_test` for operator self-test traffic and excludes it from real-volume / suspected-wash denominators. Fixes the v1.x bug where a per-seller launch signal could label a single buyer `self_test` *globally*, blowing up `suspected_wash_pct` on unrelated services. Pre-redesign tables snapshotted to `*_pre_layer4_backup`; rollback path documented in `scripts/rollback_layer4.sh`.
+- **v1.2 (2026-04-30):** Reclassified 5 weakest categories under v1.1 prompt; cross-LLM agreement settled at 78.9% on a fresh 199-sample stratified validation.
+- **v1.1 (2026-04-30):** Added 4 seller-cohort wash-farm signals (uniform_amount, coordinated_start, uniform_tx_count, time_burst). Validated against aubr.ai (sybil farm) and KR Crypto (small-cohort self-test).
+- **v1.0 (2026-04-29):** Initial 8-label taxonomy. Single-buyer signals only.
+
+---
+
+## 1. Quick reference — nine labels
+
+Every (buyer, seller) pair gets exactly one of these labels. A buyer's *global* label is the tx-weighted majority across their pairs (see §3).
+
+| Label | Read as | Counted in real volume? | Counted in suspected wash? |
+|---|---|:---:|:---:|
+| `organic_user` | Real human or unattributed real user | ✅ | — |
+| `ai_agent` | LLM-driven multi-service consumer | ✅ | — |
+| `exchange_user` | Buyer wallet IS a labelled CEX hot wallet | ✅ | — |
+| `analytics_bot` | Periodic data-scraping bot | ✅ | — |
+| `verifier` | Directory / discovery crawler | ✅ | — |
+| `developer` | Backtest / load test on a single service | ❌ | — |
+| `self_test` | Operator validating their own endpoint | ❌ | ✅ (flagged) |
+| `suspected_wash` | Structural signals consistent with manufactured volume | ❌ | ✅ (flagged) |
+| `owner_test` | Operator's own wallets (whitelist match) | ❌ (excluded from denominator) | — |
+
+`real_volume_24h`, `real_volume_pct`, and `suspected_wash_pct` shown across the dashboard derive from these labels. `owner_test` traffic is excluded from the denominator entirely — it is operator self-test traffic that we can identify with certainty (whitelist match), so reporting it as either real or wash would distort honest service stats.
+
+---
+
+## 2. Why this exists
+
+Public x402 dashboards (Coinbase Bazaar, x402scan) report raw transaction counts. For analytics this is a misleading headline number, because the same transaction counter responds identically to:
 
 - A real user buying an inference call
 - An operator pinging their own endpoint to validate it
@@ -36,329 +48,157 @@ counter responds identically to:
 - A backtesting script hammering one endpoint 600× in 10 minutes
 - A wallet structure designed to inflate numbers for marketing
 
-The first is value; the rest are noise of varying intent. Treating them as the
-same number flatters services with cheap noise sources and penalises services
-with quiet but real adoption. **x402watch's product wedge is filtering this
-noise honestly and methodically, and showing the methodology in the open.**
+The first is value; the rest are noise of varying intent. Treating them as the same number flatters services with cheap noise sources and penalises services with quiet but real adoption. **x402watch's product wedge is filtering this noise honestly and methodically, and showing the methodology in the open.**
 
 ---
 
-## 2. Eight-label taxonomy
+## 3. Four-layer architecture
 
-Every observed buyer wallet is assigned exactly one label per labelling run.
-Labels are *time-versioned*: only changes are persisted (see §5). Labels are
-mutually exclusive — a wallet that exhibits multiple signals is assigned the
-**most specific** label per the priority order below.
+```
+   ┌────────────────────────────────────────────────────────────────┐
+   │ Layer 1 — seller_flags   (per seller)                          │
+   │   normal | suspicious_launch | confirmed_wash_farm | owner     │
+   └─────────────────────┬──────────────────────────────────────────┘
+                         │
+   ┌─────────────────────▼──────────────────────────────────────────┐
+   │ Layer 2 — pair_labels   (per (buyer, seller) pair)             │
+   │   combines: seller flag + buyer global features + multi-signal │
+   └─────────────────────┬──────────────────────────────────────────┘
+                         │
+   ┌─────────────────────▼──────────────────────────────────────────┐
+   │ Layer 3 — global guards   (applied inside Layer 2)             │
+   │   e.g. self_test caps out at 10 sellers; wash needs 20+/500+   │
+   └─────────────────────┬──────────────────────────────────────────┘
+                         │
+   ┌─────────────────────▼──────────────────────────────────────────┐
+   │ Layer 4 — derive_global   (per buyer; tx-weighted majority)    │
+   │   + service-level rollup uses pair labels, not global label    │
+   └────────────────────────────────────────────────────────────────┘
+```
 
-**Effective evaluation order in code** (Phase 1):
-`exchange_user → self_test → verifier → analytics_bot → ai_agent → developer`,
-then check `suspected_wash` signals (must fire affirmatively to take effect),
-finally default to `organic_user`. So `suspected_wash` is the "specific flag
-that overrides organic when signals fire", not a pure fallback.
+The 4-layer split solves a class of bugs that the v1.x single-pass labeller had no defence against: a signal that's true about a *seller* (e.g. "this seller's launch traffic was 95% from 2 wallets") was being attached to the *buyer* and then propagated to every other service that buyer touched. v2.0 keeps seller signals on the seller, buyer signals on the buyer, and only combines them inside a specific pair.
 
-| Label              | Eval order | Heuristic centre of gravity | Counted in real-volume? |
-|--------------------|:---------:|------------------------------|:-----------------------:|
-| `exchange_user`    | 1 | Buyer wallet IS a labelled CEX hot wallet | yes (real demand) |
-| `self_test`        | 2 | Operator's own endpoint validation traffic | **no** |
-| `verifier`         | 3 | Directory / discovery crawler | **no** |
-| `analytics_bot`    | 4 | Periodic data-scraping bot | partial (configurable) |
-| `developer`        | 5 | Single-service heavy bot / backtest | **no** |
-| `ai_agent`         | 6 | LLM-driven multi-service consumer | yes |
-| `suspected_wash`   | 7 | Wash-shaped signals (uniform amount + short window, or graph cycle) | **no, flagged** |
-| `organic_user`     | 8 | None of the above signals are strong | yes |
+### Layer 1 — `seller_flags`
 
-`real_volume_24h` and `organic_traffic_pct` (in `services` and `category_stats`)
-exclude `self_test`, `verifier`, `developer`, and `suspected_wash` by default,
-and partially exclude `analytics_bot` per a per-service heuristic. Service-level
-roll-ups also write `metadata.developer_volume_pct` so the developer share is
-visible without being counted as real demand.
+For every seller active in the last 30 days, we compute one flag from this priority chain:
+
+1. **`owner_seller`** — seller wallet is in `data/owner_wallets.json` (operator self-disclosure). Short-circuits everything below.
+2. **`confirmed_wash_farm`** — cohort signals fire affirmatively. Cohort ≥ 10 distinct buyers, *and* `uniform_amount_pct ≥ 0.80` *or* `coordinated_start_pct ≥ 0.70`, *and* `tx_count_cv ≤ 0.5`. The aubr.ai case (60-buyer cohort, uniform amount = 0.97, coordinated start = 0.88) is the canonical example.
+3. **`suspicious_launch`** — within the first 7 days of a seller's `first_seen`, ≤ 3 distinct buyers cover ≥ 60% of services and the total span is ≤ 48h. This was *signal C* in v1.x — it now lives on the *seller*, where it belongs, instead of being projected onto every buyer in the cohort.
+4. **`normal`** — no flag.
+
+A seller's flag does *not* automatically label any buyer. It is one input to Layer 2.
+
+### Layer 2 — `pair_labels`
+
+For every (buyer, seller) pair active in the last 30 days, we compute a label by combining:
+
+- The seller's Layer 1 flag.
+- The buyer's global features (n_sellers, n_services, n_categories, vanity-cluster membership, inter-arrival gaps, wallet age).
+- The pair's own features (n_tx for this seller, share of buyer's total tx, primary-seller share).
+
+The pair label is the most specific label that fires, in this priority order:
+
+1. `owner_test` — buyer or seller is in the owner whitelist.
+2. `exchange_user` — buyer is in the CEX whitelist.
+3. `suspected_wash` — seller flag is `confirmed_wash_farm` *and* the buyer's primary-seller share for this seller is ≥ 80% *and* (buyer is not vanity-distant *or* buyer fits the cohort tx-count median). **Global guard:** a buyer with `n_sellers ≥ 20` *and* `n_tx ≥ 500` is treated as too diversified for `suspected_wash` on a single seller pair, even if the seller is a wash farm. They are likely a real bot that happened to touch the farm; their pair label degrades to `developer` or `organic_user` depending on burst shape.
+4. `self_test` — seller flag is `suspicious_launch` *and* the buyer is in the seller's small launch cohort. **Global guard:** a buyer with `n_sellers ≥ 10` *globally* cannot be `self_test` on any pair, because operator self-test traffic is by definition concentrated on the operator's own sellers. This guard is what stops the v1.x failure mode where a 151-seller `ai_agent` was labelled `self_test` everywhere.
+5. `verifier` — buyer paid ≥ 100 distinct services across ≥ 20 distinct sellers, per-pair tx is 1-3, first-pair tx within 72h of seller's first_seen.
+6. `analytics_bot` — wallet age > 30 days, gaps cluster on a periodic value, 1-5 services.
+7. `ai_agent` — distinct categories ≥ 4, distinct sellers ≥ 5, per-tx amounts vary (CV > 0.3), active across ≥ 7 days.
+8. `developer` — burst > 10 tx/min on a single service, ≥ 90% of pair tx on one service, payment span < 14 days.
+9. `organic_user` — default when nothing above fires.
+
+### Layer 3 — global guards (cross-cutting)
+
+The guards inside Layer 2 are the heart of v2.0's false-positive controls. They look at the buyer's *global* shape before allowing a strong label on any single pair:
+
+| Guard | Rule | Why |
+|---|---|---|
+| `SELF_TEST_MAX_GLOBAL_SELLERS = 10` | Buyer with ≥ 10 sellers globally cannot be `self_test` | Operators test their own sellers, not 10+ others |
+| `WASH_DIVERSIFIED_MIN_SELLERS = 20` | Buyer with ≥ 20 sellers + ≥ 500 tx cannot be `suspected_wash` on a single pair | Real bots brush against wash farms; one pair doesn't make them wash |
+| Vanity-cohort tx-count carve-out | A vanity-cluster member whose `n_tx ≥ 5× cohort median` keeps `self_test` (operator main wallet) instead of `suspected_wash` (sybil) | Distinguishes the operator from their sybil army |
+
+### Layer 4 — `derive_global` and service rollups
+
+The global buyer label is the **tx-weighted majority** label across that buyer's pairs. Ties are broken by tx-weighted average confidence. Owner buyers short-circuit to `owner_test`. The reason field lists the top three contributing labels with their tx-share (e.g. `derived_from_pairs:ai_agent(82%),developer(15%),organic_user(3%)`).
+
+Service rollups (`real_volume_pct`, `suspected_wash_pct` in the `services` table) are computed from **pair labels**, not the buyer's global label. This is the second key v2.0 fix: under v1.x, a single global label per buyer was applied to every service they touched. Under v2.0, the same buyer can be `ai_agent` to service A and `developer` to service B, and each service sees the truthful per-pair share.
+
+`owner_test` traffic is excluded from both numerator and denominator of the service rollup — it is neither demand nor fraud and shouldn't compress either percentage.
 
 ---
 
-## 3. Detection signals per label
+## 4. Confidence bands
 
-Each label is decided by a small set of signals. **Confidence** in `[0, 1]` is
-the proportion of triggering signals weighted by their reliability. We persist
-the human-readable `reason` so audit and operator dispute is easy.
+Every label carries a confidence in `[0, 1]`. The dashboard renders three bands:
 
-### 3.1 `exchange_user`
-
-Match `buyer_address` against `data/exchange_wallets.json`. Direct match → label
-with `confidence = 1.0`.
-
-Signals:
-1. Direct match in CEX whitelist (sufficient).
-2. (Phase 2, requires upstream RPC) Funded ≤ 2 hops from a CEX whitelist wallet
-   within 30 days, no other labels triggered.
-
-Failure mode: A real user *withdrew from CEX yesterday* will not match unless
-we expand to upstream funding. Acceptable at Phase 1.
-
-### 3.2 `self_test` *(highest-leverage label — see §4)*
-
-The "operator validating their own endpoints" pattern. KR Crypto's launch is
-the canonical example. **Phase 1 implementation evaluates four named signals
-A/B/C/D and assigns the label if any is satisfied.** Confidence reflects
-signal strength.
-
-#### Signal A — vanity cluster + single-service concentration
-Buyer is a member of a per-seller vanity cluster *and* paid only one service.
-Strong indicator that a vanity-mined wallet was used to pad a specific
-service's launch traffic.
-- **Confidence:** 0.62–0.97 depending on the vanity tier (see below).
-
-#### Signal B — vanity cluster + single transaction
-Buyer is a vanity-cluster member with `n_tx == 1` and a tiny amount. This
-catches the "fire-once-and-forget" wallets seen in the KR Crypto cohort that
-the previous prototype missed.
-- **Confidence:** 0.66 (broad-vanity) to 1.00 (strict-vanity).
-
-#### Signal C — launch-window concentration
-Within the first 7 days of a seller's first service `first_seen`:
-the seller's distinct-buyer count is `≤ 3`, this buyer covered `≥ 60%` of the
-seller's services, and total span `≤ 48h`. Captures the classic "operator
-hammers their own endpoints right after launch" pattern, even without vanity
-addresses.
-- **Confidence:** 0.80.
-
-#### Signal D — funding-source equality *(deferred to Phase 2)*
-Buyer's funding source (1–2 hops upstream) equals the seller's wallet (or a
-related operator wallet). Requires off-chain RPC traversal of buyer funding
-history; not implemented in Phase 1 because we only index x402 inflows, not
-buyer-side balance histories.
-
-#### Vanity clustering — two tiers (Day 7 recommendation #1)
-
-| Tier | prefix len | suffix len | min cluster size | Pattern caught |
-|---|:---:|:---:|:---:|---|
-| `strict` | 4 hex | 3 hex | 3+ | orbisapi-style farmed wallets (`0x07b0...c0d` ×17) |
-| `broad`  | 2 hex | 3 hex | 4+ | KR Crypto-style short vanity (`0x29...725` ×6) |
-
-A buyer in **both** tiers gets the strongest base confidence (0.95). Strict-only
-maps to 0.90, broad-only to 0.60.
-
-#### False-positive controls
-- Signal C requires a small-cohort *seller* (`≤ 3` first-7d distinct buyers),
-  so a single early adopter on a successful launch will not match.
-- Vanity signals require `min_cluster_size ≥ 3` (strict) or `≥ 4` (broad);
-  collisions by chance at these thresholds are vanishingly rare for random
-  addresses (`(1/16^7)^3 ≈ 4×10^-25` per coincidence).
-- A buyer matching Signal C *but* with broad activity (e.g., 100+ services
-  paid system-wide) is a known limitation: they get globally labelled
-  `self_test` even when their main role looks like `ai_agent`. Phase 1 accepts
-  this conservative bias; Phase 2 may scope Signal C per-seller instead of
-  per-buyer.
-
-### 3.3 `verifier`
-
-Directory / crawler bots like x402scan that validate every newly listed service.
-
-Signals (any 3 of 5):
-1. Buyer paid `≥ 100` distinct services across `≥ 20` distinct sellers within
-   30 days. (Threshold tuned to current ecosystem; will rise with growth.)
-2. Per-service tx count is consistently `1–3` (sample-once-then-leave).
-3. First payment to a new service occurs within `< 72 hours` of that service's
-   `first_seen`.
-4. Inter-tx gap distribution is heavy-tailed and machine-like (long pauses,
-   then short bursts during indexing windows).
-5. Wallet has **no concentrated sub-ecosystem** — never spends `> 5%` of total
-   tx on any single service.
-
-### 3.4 `analytics_bot`
-
-Periodic data-scraping bot — typically a long-lived wallet, fixed cadence.
-
-Signals (any 3 of 5):
-1. Buyer's first activity on x402 is `> 30 days` before the labelling run.
-2. Per-service inter-tx gaps cluster on a single periodic value (every 5 min,
-   every hour, every 4 hours) within `±10%` jitter.
-3. Concentrated on `1–5` services (data-source endpoints).
-4. Volume profile is steady (CV of daily tx count `< 0.4`).
-5. Median amount equals service `price_amount` exactly (no rounding errors,
-   suggests programmatic billing).
-
-Distinguished from `developer` by **wallet age** and **steady cadence** (not
-bursty).
-
-### 3.5 `developer`
-
-Backtest, load test, or paid-for-once-then-forgotten debug session.
-
-Signals (any 3 of 5):
-1. Burst rate `> 10 tx/minute` for any 60-minute window on a single service.
-2. `≥ 90%` of buyer's tx fall on **one service**.
-3. Payment span `< 14 days` total.
-4. Wallet age (first_seen on x402) `< 14 days` at peak burst.
-5. After burst ends, tx rate drops to near-zero and stays there.
-
-### 3.6 `ai_agent`
-
-LLM-driven users who hit a varied set of services per task.
-
-Signals (any 3 of 5):
-1. Distinct service categories `≥ 4` across the wallet's history.
-2. Distinct sellers `≥ 5`.
-3. Per-tx amounts vary (CV `> 0.3`); not a fixed rate.
-4. Inter-tx gap distribution has a heavy short-tail (sub-second clusters during
-   an LLM's tool-use bursts).
-5. Wallet is *active*: uses x402 across multiple separate sessions over `≥ 7`
-   days.
-
-This label is **revenue-positive** for x402 services and is counted in real
-volume.
-
-### 3.7 `organic_user`
-
-Catch-all for buyers showing no strong signal of any other label *and* meeting
-basic plausibility:
-
-- Wallet age `> 24 hours` at first x402 tx.
-- Total tx `≥ 2` (single-tx buyers go to `suspected_wash` only if other signals
-  fire; otherwise `organic_user`).
-- No vanity address pattern in their cohort.
-
-`organic_user` is the default — better to over-include here than to mis-label
-and depress a service's reported real volume. Operator dispute mechanism
-(Phase 1) lets us recover from false negatives elsewhere.
-
-### 3.8 `suspected_wash`
-
-Reserved for buyers exhibiting structural signals consistent with manufactured
-volume but *not* fitting the operator-self-test pattern. Phase 1 evaluates two
-families of signals: **single-buyer signals** (legacy) and **seller-cohort
-signals** (new in v1.1).
-
-#### 3.8a Single-buyer signals (legacy)
-
-A non-vanity buyer with all of:
-- Single-service concentration (`n_services == 1`, `n_tx ≥ 5`).
-- Activity span `< 3 days`.
-- Amount uniformity: `(max - min) / avg < 5%`.
-
-Plus optional graph-cycle participation (NetworkX `simple_cycles`). Phase 1
-cycle detection has limited reach because we only index x402 inflows; Phase 2
-will add seller outflow indexing for true round-trip detection.
-
-#### 3.8b Seller-cohort signals (v1.1) — **the heart of v1.1**
-
-Computed once per seller over the last 30 days; if a seller is flagged as a
-**wash farm**, its non-vanity buyers (with `primary_seller_share ≥ 80%`) get
-labelled `suspected_wash` with high confidence.
-
-| Signal | Definition | Threshold for fire |
-|---|---|---:|
-| `cohort_size` | distinct buyers paying this seller in 30d | `≥ 10` |
-| `uniform_amount_pct` | share of cohort buyers whose median amount equals the seller's modal amount | `≥ 80%` |
-| `coordinated_start_pct` | max share of buyers whose first-tx falls in any single 30-min window | `≥ 70%` |
-| `uniform_tx_count_cv` | stddev/avg of tx counts across the cohort | `≤ 0.5` |
-
-**Wash-farm rule:** `cohort_size ≥ 10 AND (uniform_amount OR coordinated_start) AND uniform_tx_count`.
-A confidence boost is awarded for a 4th signal: `cohort_size ≥ 20`.
-
-#### 3.8c Vanity-cluster reclassification under v1.1
-
-A buyer who is in a vanity cluster *and* whose primary seller is a wash farm
-*and* the cohort is large (`≥ 10`) is reclassified from `self_test` to
-`suspected_wash` (sybil-farm member), with one carve-out: if the buyer's
-`n_tx ≥ 5×` the cohort's median, treat them as the *operator's* main wallet
-and keep the `self_test` label. This lets us distinguish the operator from
-the army of sybil wallets they minted.
-
-#### 3.8d Validation case differences
-
-| Pattern | aubr.ai | KR Crypto | orbisapi |
+| Band | Confidence | UI rendering | Behaviour |
 |---|---|---|---|
-| `cohort_size` | 60 | 8 | 71 |
-| `uniform_amount_pct` | 0.97 | 0.20 | mixed |
-| `coordinated_start_pct` | 0.88 (12:30-13:00 4/28) | 0.10 (multi-day) | low |
-| `uniform_tx_count_cv` | 0.23 | high | high |
-| **wash-farm verdict** | **YES** | NO (cohort < 10) | NO (CV high) |
-| Vanity strict cluster | none | none | 17 buyers `0x07b0..c0d` |
-| Vanity broad cluster | none | 6 buyers `0x29..725` | n/a |
-| **Final labels** | 59/60 → `suspected_wash`, 1 → `self_test` (operator) | 8/8 → `self_test` | 17 vanity → `self_test`, 3 high-burst → `developer`, rest mixed |
-| **Confidence** | 0.90 | 0.62–0.80 | 0.62–0.97 |
+| **Strong** | `≥ 0.85` | Bold literal label (`ai_agent`) | Counted as the label in all stats |
+| **Likely** | `0.70 – 0.84` | Softened label (`likely ai_agent`) + ⚠ link to this section | Counted as the label in stats, but visually softened so users understand it isn't certain |
+| **Unknown** | `< 0.70` | `unlabeled` (italic, muted) | Treated as no-decision in the public UI |
 
-KR Crypto and orbisapi are correctly *kept* as self-test even after v1.1 because
-their cohort signatures are not coordinated farms (varied amounts, varied
-timing, high tx_count CV). aubr.ai is correctly *upgraded* from a noisy
-single-buyer label to high-confidence cohort-driven `suspected_wash`.
+Why these thresholds? Empirically, our pair-label confidence distribution is bimodal — clear cases cluster above 0.85 and clear non-cases below 0.50. The 0.70 floor is where the false-positive rate on hand-audited 30-buyer samples crosses ~5%, which is our public-display ceiling. The 0.85 line is where it crosses ~1%.
+
+Owner-whitelisted labels (`owner_test`, `exchange_user`) bypass the soft band — they come from exact-match enumeration, so there is no confidence gradient to soften.
 
 ---
 
-## 4. Self-test detection in detail
+## 5. Known false-positive patterns
 
-This is the highest-leverage detection because:
-- It captures the *most common* form of inflated traffic in early x402.
-- It's the most defensible to surface: "operator validating their own service"
-  is a benign behaviour we can label without accusing anyone.
-- The signals are clean and the false-positive cost is low (organic users on a
-  brand-new service look little like a saturated self-test).
+We list these openly because they're more useful disclosed than hidden:
 
-### Algorithm
-
-```
-for each (seller, service) launched in the last 30 days:
-    buyers_in_first_7d = SELECT DISTINCT buyer FROM transactions
-                          WHERE service_id IN (seller's services)
-                            AND time BETWEEN service.first_seen
-                                         AND service.first_seen + INTERVAL '7 days'
-    if len(buyers_in_first_7d) > 3:
-        skip   # too many distinct buyers — not a self-test pattern
-
-    for buyer in buyers_in_first_7d:
-        signals = {
-            'first_7d_concentration':
-                buyer accounts for > 60% of first-7d tx for any one service,
-            'cross_service':
-                buyer paid >= 60% of seller's distinct services,
-            'time_concentrated':
-                median inter-tx < 60s AND p90 span < 48h,
-            'sharp_decay':
-                > 80% of buyer's seller-tx in first 72h,
-            'vanity_pattern':
-                shares 6+ char prefix or suffix with >=3 other buyers
-                of the same seller,
-            'price_minimum':
-                avg amount <= 1.2× lowest price across seller's services,
-        }
-        if sum(signals.values()) >= 4:
-            label(buyer, 'self_test',
-                  confidence=sum/6,
-                  reason=','.join(k for k,v in signals.items() if v))
-```
-
-### Validation case — KR Crypto
-
-Five buyer addresses observed against KR Crypto's wallet share the structural
-prefix `0x29` and suffix `725`:
-
-```
-0x2914...8c315be174ef40dc962d79725  — 33 tx (high-volume "Render.com" candidate)
-0x2915ad...aebb3885c4971c155178c7fb17ebb725
-0x29195555...e044fc7230e623791e64df68da2ea725
-0x2919b6...83822c05ffbe31240485165525380e9725
-0x291fe7...9ce24a81af44024c3afc90e68ae29ad725
-0x291028...aff1a940096be6f66dda10c4be8f687725
-```
-
-Five wallets sharing both a 4-char prefix AND a 3-char suffix is exceedingly
-unlikely by chance (probability `(1/16)^14 ≈ 5×10^-18` per pair, much higher
-when the wallets are vanity-mined to spec). The vanity_pattern signal alone
-warrants flagging; combined with single-service-each + tiny-amount + within-
-launch-window, all five clear the 4-of-6 threshold.
-
-The `0x2914...725` wallet (33 tx, $1.10) is the **outlier** that needs careful
-treatment: it might be the operator's *primary* test wallet (prolonged usage),
-*or* it might be an externally hosted server (e.g., Render.com) that the
-operator pre-paid for and which then runs continuously. Distinguishing requires
-operator self-disclosure in Phase 1; until then it labels as `self_test` and
-the operator can dispute.
+- **AI agents touching wash farms.** A real LLM-driven user that happens to brush against a confirmed wash farm gets a `suspected_wash` label *on that pair*. Layer 3's diversified-buyer guard prevents this from contaminating their global label, but a service-level view will see the wash share on that one pair. Mitigation: filter the affected service's view, or rely on the buyer's per-pair confidence.
+- **New legit services with small launch cohorts.** A service with 2-3 enthusiastic early adopters within its first 7 days fits the `suspicious_launch` seller pattern even if all 3 are genuine. Mitigation: this only escalates to a `self_test` pair label if the buyer also passes the cohort-membership signal. Single early adopters with broad activity elsewhere stay `organic_user`.
+- **Operator-funded hot wallets we don't know about.** If an operator runs a hosted Render.com / Fly.io server with a wallet we haven't whitelisted, that server's traffic will look like a high-tx single-service buyer — typically `developer`, sometimes `self_test`. Mitigation: operator self-disclosure via the dispute mechanism (§6) adds the wallet to `data/owner_wallets.json`.
+- **CEX withdrawal first-tx.** A real user who withdrew from a CEX yesterday won't match the CEX whitelist (because the buyer wallet is their personal address, not the exchange hot wallet). They'll label as `organic_user` — correct outcome, but `exchange_user` undercounts true exchange-funded demand. Phase 2 will follow funding hops.
+- **The v1.x bug we just fixed.** Pre-v2.0, a 151-seller `ai_agent` (buyer `0x15C3…`) was globally labelled `self_test` because they happened to be in 31 sellers' launch cohorts. This compressed `real_volume_pct` on the 120 services where they were a legitimate user. v2.0's Layer 3 `SELF_TEST_MAX_GLOBAL_SELLERS = 10` guard is the structural fix.
 
 ---
 
-## 5. Storage model
+## 6. Dispute process
 
-### `buyer_labels` (TimescaleDB hypertable)
+Labels are public-facing numbers that move money (low `real_volume_pct` will lose marketing pull). We treat disputes as a first-class feature:
+
+- **Report-incorrect-label button** on `self_test` and `suspected_wash` badges. Opens a pre-filled GitHub Issue with buyer / seller / label / reason fields so we can triage and reproduce.
+- **Operator whitelist intake.** If you operate a service and the dispute is "those are our own test wallets", send a signed message from the seller wallet to `data/owner_wallets.json`. Verified wallets get the `owner_test` label permanently.
+- **Backend dispute API (Phase 2).** A `POST /api/disputes` endpoint with a `dispute → re-label` audit log is the planned next step. Until then, GitHub Issues is the system of record.
+- **Re-evaluation cadence.** Daily labeller run picks up any whitelist or override changes within 24h. Backfill on demand if a dispute is time-sensitive.
+
+We will not silently rewrite labels in response to disputes — every change is committed to the `buyer_labels` hypertable with an audit reason, and the changelog at the top of this document tracks methodology-level shifts.
+
+---
+
+## 7. Storage model
+
+### `buyer_seller_labels` (Layer 2 output)
+
+```sql
+CREATE TABLE buyer_seller_labels (
+    buyer_address  TEXT NOT NULL,
+    seller_address TEXT NOT NULL,
+    label          TEXT NOT NULL,
+    confidence     NUMERIC(3,2),
+    reason         TEXT,
+    updated_at     TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (buyer_address, seller_address)
+);
+```
+
+### `seller_flags` (Layer 1 output)
+
+```sql
+CREATE TABLE seller_flags (
+    seller_address TEXT PRIMARY KEY,
+    flag           TEXT NOT NULL,   -- normal | suspicious_launch | confirmed_wash_farm | owner_seller
+    cohort_size    INT,
+    signals_json   JSONB,
+    updated_at     TIMESTAMPTZ NOT NULL
+);
+```
+
+### `buyer_labels` (Layer 4 output, TimescaleDB hypertable)
 
 ```sql
 CREATE TABLE buyer_labels (
@@ -372,112 +212,85 @@ CREATE TABLE buyer_labels (
 SELECT create_hypertable('buyer_labels', 'time');
 ```
 
-We write **only on label change**, not every recompute. This keeps the table
-small (most buyers' labels are stable across days) and gives a clean
-historical read: "what was this buyer's label on date X?" → most-recent row
-where `time ≤ X`.
+We write **only on label change** (or confidence shift ≥ 0.10). Most buyers' labels are stable across days; the hypertable stays small and historical reads stay fast.
 
 ### Service rollups in `services`
 
 ```sql
-ALTER TABLE services
-    ADD COLUMN organic_traffic_pct NUMERIC(5,2),
-    ADD COLUMN suspected_wash_pct  NUMERIC(5,2),
-    ADD COLUMN last_label_calc     TIMESTAMPTZ;
+organic_traffic_pct  NUMERIC(5,2),  -- real / (total − owner_test)
+suspected_wash_pct   NUMERIC(5,2),  -- wash / (total − owner_test)
+metadata             JSONB,         -- developer_volume_pct, owner_test_tx
+last_label_calc      TIMESTAMPTZ
 ```
-
-`organic_traffic_pct` is the share of the service's last-30-day tx coming from
-buyers whose **current** label is `exchange_user`, `ai_agent`, or `organic_user`.
-`suspected_wash_pct` is the share from `suspected_wash`. Other labels
-(self_test / verifier / developer / analytics_bot) are excluded from both
-percentages by design — they are neither real demand nor manufactured fraud,
-just a category we set aside.
 
 ### Recompute schedule
 
-`Daily at KST 09:00` (UTC 00:00). Triggered by a systemd timer.
-
-The labeller iterates buyers active in the last 30 days, computes the signal
-vector, and:
-1. Writes a new `buyer_labels` row only when the label or `(confidence, reason)`
-   pair changes meaningfully (we treat reason changes as informational and
-   require a full label transition or `confidence` shift `≥ 0.2` to write).
-2. Recomputes `services.{organic_traffic_pct, suspected_wash_pct,
-   last_label_calc}` for every active service.
+Daily at KST 09:00 (UTC 00:00) via systemd timer on the Oracle ARM box. The full v2.0 pipeline (seller_flags → pair_labels → derive_global → service rollups) currently runs in ~25 seconds for ~5,400 pairs and ~1,000 sellers.
 
 ---
 
-## 6. False-positive handling
+## 8. Academic grounding
 
-Wash-filter labels are **public-facing** numbers that can move money (services
-with low organic_traffic_pct will lose marketing pull). We treat false
-positives as a first-class concern:
-
-- **No accusatory labels in the public UI for low-confidence verdicts.**
-  `suspected_wash` is shown only when `confidence ≥ 0.7`. Below that, the
-  buyer is labelled `organic_user` and the signal is logged internally for
-  ongoing tuning.
-- **Operator dispute mechanism (Phase 1).** A service operator who claims they
-  are not self-testing can submit a wallet for re-evaluation. We will not
-  reverse the label, but we'll surface their claim alongside ours and give
-  them a per-service "operator disputes" pill in the UI.
-- **Wallet-cluster overrides.** A short editorial whitelist for wallets we
-  know are legitimate via off-chain signals (e.g., a service's verified
-  Render.com server). Stored in `data/buyer_overrides.json`; precedence over
-  algorithmic labels.
-- **Conservative defaults.** When in doubt, label `organic_user` rather than
-  `suspected_wash`. Better to under-flag than over-flag publicly.
+- **Cong, Li, Tang, Yang (2023)** — *"Crypto Wash Trading"*, *Management Science* 69(11): 6427–6454. Establishes the ~70% wash-trade share on unregulated CEXes via Benford-law and trade-size rounding tests; provides the statistical playbook for amount-pattern signals.
+- **Victor & Weintraud (2021)** — *"Detecting and Quantifying Wash Trading on Decentralized Cryptocurrency Exchanges"*, WWW '21. arXiv:2102.07001. Directed-graph cycle detection — the basis for our graph-cycle suspect signal.
+- **Ramos & Zanko (2020)** — *"A review on cryptocurrency transaction methods for money laundering"*, J. Money Laundering Control 23(4). Funding-graph heuristics for sybil detection.
+- **Aspris, Foley, Svec, Wang (2021)** — *"Decentralized exchanges: The 'wild west' of cryptocurrency trading"*, Int. Rev. Financial Analysis 77. Empirical baseline rates of wash trading used to sanity-check our thresholds.
 
 ---
 
-## 7. Academic grounding
+## 9. Open questions / known limitations
 
-The taxonomy and the cycle-detection approach to wash trading draw from:
-
-- **Cong, Li, Tang, Yang (2023)** — *"Crypto Wash Trading"*, *Management
-  Science* 69(11): 6427–6454. DOI 10.1287/mnsc.2023.4869. Establishes the
-  ~70% wash-trade share on unregulated CEXes via Benford-law and trade-size
-  rounding tests; provides the statistical playbook for §3.8 amount-pattern
-  signals.
-
-- **Victor & Weintraud (2021)** — *"Detecting and Quantifying Wash Trading on
-  Decentralized Cryptocurrency Exchanges"*, WWW '21. arXiv:2102.07001.
-  Introduces the directed-graph cycle detection approach we implement in
-  Week 2: build a buyer→seller transfer graph over a window, run
-  `simple_cycles` to surface round-trip flows, score by cycle length and
-  amount-uniformity. Establishes the wallet-cluster heuristics we adapt for
-  §3.8 funding-correlation signals.
-
-- **Ramos & Zanko (2020)** — *"A review on cryptocurrency transaction
-  methods for money laundering"*, J. Money Laundering Control 23(4).
-  Background on funding-graph heuristics for sybil and wash detection.
-
-- **Aspris, Foley, Svec, Wang (2021)** — *"Decentralized exchanges: The
-  'wild west' of cryptocurrency trading"*, Int. Rev. Financial Analysis 77.
-  Provides the empirical baseline rates of wash trading we use to sanity-
-  check our detection thresholds (avoid both over- and under-flagging).
+1. **Cross-chain identity.** Same operator, different wallets per chain. Each chain is currently independent. Phase 2 may use ENS / Coinbase Smart Wallet linking.
+2. **CEX whitelist on Base/Arbitrum.** Public sources are sparse. We seed `data/exchange_wallets.json` from known hot wallets and expand opportunistically.
+3. **`ai_agent` vs `organic_user` boundary.** Both are real-volume-positive, so the split matters less for headline numbers than for category-mix reporting.
+4. **Suspected_wash without graph features.** v2.0 ships without NetworkX cycle detection at scale; only structural cohort signals are wired into Layer 1. Cycle detection is a follow-up.
+5. **Solana labelling lag.** Solana addresses aren't hex; the vanity-cluster prefix/suffix heuristics from v1.x EVM logic are disabled on Solana pairs pending a base58-aware reimplementation.
 
 ---
 
-## 8. Open questions / known limitations
+## Appendix A. v1.x signal reference (historical)
 
-1. **Cross-chain identity.** Same operator, different wallets per chain. We
-   currently treat each chain independently. Phase 2 may use ENS / Coinbase
-   Smart Wallet linking.
-2. **CEX whitelist on Base/Arbitrum.** Public sources are sparse; users must
-   populate `data/exchange_wallets.json` with chain-specific entries.
-3. **`ai_agent` vs `organic_user` boundary.** Both are positive-counted, so
-   the split matters less for headline numbers than for category-mix
-   reporting. We may collapse them in v1.
-4. **Label persistence vs re-labelling.** A wallet labelled `developer` during
-   a backtest burst should not stay labelled `developer` forever once their
-   activity changes shape. The daily recompute handles this — we just need to
-   ensure label transitions are surfaced rather than silently overwritten.
-5. **Suspected_wash without graph features.** Phase 1 ships without
-   NetworkX cycle detection (signal 1 and 6 in §3.8); only structural signals
-   2/3/4/5 are available. Cycle detection arrives Week 2.
+The signals below are the per-buyer heuristics from v1.0 / v1.1. Most are subsumed into Layer 1 seller flags or Layer 2 buyer features in v2.0. Documented here so that older changelogs, GitHub issues, and external citations remain interpretable.
+
+### Vanity clustering (v1.x) — two tiers
+
+| Tier | prefix len | suffix len | min cluster size | Pattern caught |
+|---|:---:|:---:|:---:|---|
+| `strict` | 4 hex | 3 hex | 3+ | orbisapi-style farmed wallets (`0x07b0...c0d` ×17) |
+| `broad`  | 2 hex | 3 hex | 4+ | KR Crypto-style short vanity (`0x29...725` ×6) |
+
+A buyer in **both** tiers gets the strongest base confidence (0.95). Strict-only maps to 0.90, broad-only to 0.60. In v2.0 these tiers feed Layer 2's vanity-cohort tx-count carve-out.
+
+### Self-test signals A/B/C/D (v1.x)
+
+- **Signal A** — vanity cluster + single-service concentration. *In v2.0:* fed into Layer 1 `suspicious_launch` + Layer 2 pair logic.
+- **Signal B** — vanity cluster + single transaction. *In v2.0:* Layer 2 cohort-membership.
+- **Signal C** — launch-window concentration (≤ 3 distinct buyers covering ≥ 60% of services within 48h of `first_seen`). *In v2.0:* now lives entirely on the **seller** as the `suspicious_launch` flag. This is the v1.x → v2.0 architectural fix.
+- **Signal D** — funding-source equality. Deferred (requires off-chain RPC traversal).
+
+### Seller-cohort signals (v1.1)
+
+| Signal | Definition | Threshold |
+|---|---|---:|
+| `cohort_size` | distinct buyers paying this seller in 30d | `≥ 10` |
+| `uniform_amount_pct` | share of cohort whose median amount equals seller's modal amount | `≥ 80%` |
+| `coordinated_start_pct` | max share of buyers whose first-tx falls in any single 30-min window | `≥ 70%` |
+| `uniform_tx_count_cv` | stddev/avg of tx counts across the cohort | `≤ 0.5` |
+
+**Wash-farm rule (v1.1, unchanged in v2.0):** `cohort_size ≥ 10 AND (uniform_amount OR coordinated_start) AND uniform_tx_count`. In v2.0 these feed Layer 1's `confirmed_wash_farm` flag.
+
+### Validation cases (v1.1 → v2.0)
+
+| Pattern | aubr.ai | KR Crypto | orbisapi |
+|---|---|---|---|
+| `cohort_size` | 60 | 8 | 71 |
+| `uniform_amount_pct` | 0.97 | 0.20 | mixed |
+| `coordinated_start_pct` | 0.88 | 0.10 | low |
+| `uniform_tx_count_cv` | 0.23 | high | high |
+| v1.1 seller verdict | wash farm | (cohort < 10) | (cv high) |
+| v2.0 Layer 1 flag | `confirmed_wash_farm` | `suspicious_launch` | `suspicious_launch` |
+| v2.0 final labels | 59 → `suspected_wash`, 1 → `self_test` | 8 → `self_test` | 17 vanity → `self_test`, 3 high-burst → `developer`, rest mixed |
 
 ---
 
-*Last updated: 2026-04-30. Methodology owner: PrintMoneyLab. Disputes welcome
-in operator Telegram or via the Phase-1 dispute form.*
+*Last updated: 2026-04-30. Methodology owner: PrintMoneyLab. Disputes: GitHub Issues under `dispute` / `label-review` labels.*

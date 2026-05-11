@@ -198,9 +198,10 @@ export default async function ServiceDetailPage({
                 What these labels mean
               </h3>
               <p className="text-foreground/65 leading-relaxed mb-3">
-                Every buyer wallet gets one of 8 labels per day based on cohort,
-                vanity, and timing signals. Real-volume reporting excludes
-                self-test, suspected_wash, and developer traffic.
+                Every (buyer, seller) pair is labelled from cohort, vanity,
+                and timing signals, then aggregated into a global buyer label.
+                Real-volume reporting excludes self-test, suspected wash,
+                developer, and operator self-test traffic.
               </p>
               <Link
                 href="/docs/methodology"
@@ -223,7 +224,10 @@ export default async function ServiceDetailPage({
               Ranked by transaction count.
             </p>
           </div>
-          <TopBuyersTable buyers={detail.top_buyers} />
+          <TopBuyersTable
+            buyers={detail.top_buyers}
+            sellerAddress={s.seller_address}
+          />
         </div>
       </section>
 

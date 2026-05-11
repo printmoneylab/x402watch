@@ -72,6 +72,7 @@ export type ServiceDetail = {
     buyer_address: string;
     label: string | null;
     confidence: number | null;
+    reason?: string | null;
     tx_count: number;
     volume: number;
   }[];

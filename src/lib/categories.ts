@@ -142,6 +142,7 @@ export const LABEL_COLOR_TW: Record<string, string> = {
   analytics_bot: "bg-sky-400",
   verifier: "bg-slate-400",
   suspected_wash: "bg-rose-500",
+  owner_test: "bg-yellow-300",
   unlabeled: "bg-zinc-700",
 };
 

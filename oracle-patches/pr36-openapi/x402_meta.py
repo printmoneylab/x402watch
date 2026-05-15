@@ -307,35 +307,118 @@ class X402PreflightMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-class X402ResourceInjectionMiddleware(BaseHTTPMiddleware):
-    """For 402 responses, copy the top-level `resource.url` into every
-    accepts[].resource AND accepts[].extra.resource, then re-encode the
-    `payment-required` header. If the body is empty `{}`, write the
-    patched challenge JSON into the body so clients that don't read
-    the header get parity."""
+REWRITER_VERSION = "v2.1"
 
-    async def dispatch(self, request: Request, call_next):
-        response: Response = await call_next(request)
-        if response.status_code != 402:
-            return response
 
-        # Read and patch the payment-required header (case-insensitive).
-        header_value = None
-        header_name = None
-        for k, v in response.headers.items():
-            if k.lower() == "payment-required":
-                header_value = v
-                header_name = k
+class X402ResourceRewriter:
+    """Pure ASGI middleware that rewrites every 402 response so each
+    accepts[i] entry repeats the top-level resource URL in both
+    `resource` and `extra.resource`, and the body mirrors the
+    payment-required header.
+
+    The previous attempt used a Starlette `BaseHTTPMiddleware` and
+    didn't fire on production 402s — most likely because the x402
+    facilitator emits the 402 from a position outside our user-
+    middleware chain, so the response is finalised before `dispatch()`
+    is reached on the unwind. `BaseHTTPMiddleware` is also known to
+    have edge cases with buffered/streaming responses where the body
+    iterator is consumed before the dispatcher sees it.
+
+    A pure ASGI middleware wrapped around `app` from the outside
+    (`app = X402ResourceRewriter(app)`) is guaranteed to sit outside
+    every other piece of the stack — facilitator middleware, CORS
+    middleware, exception handlers, and anything else — so it always
+    sees the final outgoing response.
+
+    Adds `X-X402-Rewriter: v2.1` to every response it touches so the
+    wiring can be verified in two seconds with `curl -I`.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            return await self.app(scope, receive, send)
+
+        # Per-request state. We only intercept (buffer the body) when
+        # the response is a 402; everything else streams through.
+        state = {
+            "start": None,
+            "intercept": False,
+            "body_chunks": [],
+            "tracer_sent": False,
+        }
+
+        async def send_wrapper(message):
+            mtype = message.get("type")
+
+            if mtype == "http.response.start":
+                state["start"] = message
+                state["intercept"] = message.get("status") == 402
+                if not state["intercept"]:
+                    # Add tracer header to everything so we can prove
+                    # the rewriter is in the chain even on 200s.
+                    headers = list(message.get("headers") or [])
+                    headers.append((b"x-x402-rewriter", REWRITER_VERSION.encode()))
+                    new_msg = dict(message)
+                    new_msg["headers"] = headers
+                    await send(new_msg)
+                # If intercepting we hold the start message until the
+                # body is fully buffered, since we need to recompute
+                # content-length and possibly amend headers.
+
+            elif mtype == "http.response.body":
+                if state["intercept"]:
+                    state["body_chunks"].append(message.get("body", b""))
+                    if not message.get("more_body", False):
+                        await self._rewrite_and_send(state, send)
+                else:
+                    await send(message)
+
+            else:
+                # Other message types (rare on HTTP): pass through.
+                await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+    async def _rewrite_and_send(self, state, send):
+        start = state["start"] or {}
+        headers = list(start.get("headers") or [])
+        body_bytes = b"".join(state["body_chunks"])
+
+        pr_value: Optional[bytes] = None
+        for name, value in headers:
+            if name.lower() == b"payment-required":
+                pr_value = value
                 break
-        if not header_value:
-            return response
 
-        try:
-            challenge = json.loads(base64.b64decode(header_value))
-        except Exception:
-            log.exception("could not decode payment-required header")
-            return response
+        challenge: Optional[dict] = None
+        if pr_value is not None:
+            try:
+                challenge = json.loads(base64.b64decode(pr_value))
+            except Exception:
+                log.exception("could not decode payment-required header")
+                challenge = None
 
+        # If no usable challenge in the header, also try to pull one
+        # from the body — some facilitators put the JSON there only.
+        if challenge is None and body_bytes:
+            try:
+                maybe = json.loads(body_bytes)
+                if isinstance(maybe, dict) and isinstance(maybe.get("accepts"), list):
+                    challenge = maybe
+            except Exception:
+                pass
+
+        if challenge is None:
+            # Nothing to patch — pass through unchanged.
+            new_headers = headers + [(b"x-x402-rewriter", b"v2.1-noop")]
+            await send({**start, "headers": new_headers})
+            await send({"type": "http.response.body", "body": body_bytes, "more_body": False})
+            return
+
+        # Patch accepts entries.
         resource_url = (challenge.get("resource") or {}).get("url")
         if resource_url and isinstance(challenge.get("accepts"), list):
             for entry in challenge["accepts"]:
@@ -345,61 +428,53 @@ class X402ResourceInjectionMiddleware(BaseHTTPMiddleware):
                 extra = entry.get("extra")
                 if not isinstance(extra, dict):
                     extra = {}
-                    entry["extra"] = extra
                 extra["resource"] = resource_url
+                entry["extra"] = extra
 
-        # Re-encode header.
-        new_header = base64.b64encode(
+        new_header_value = base64.b64encode(
             json.dumps(challenge, separators=(",", ":")).encode("utf-8")
-        ).decode("ascii")
+        ).decode("ascii").encode("ascii")
 
-        # Read the existing body so we can replace it.
-        body_bytes = b""
-        async for chunk in response.body_iterator:
-            body_bytes += chunk
-        try:
-            body_obj = json.loads(body_bytes) if body_bytes else {}
-        except Exception:
-            body_obj = {}
-        # If the body is empty / not the challenge, inject the full
-        # challenge so header and body agree.
-        if not isinstance(body_obj, dict) or not body_obj.get("accepts"):
-            body_obj = challenge
+        new_body = json.dumps(challenge, separators=(",", ":")).encode("utf-8")
 
-        new_body = json.dumps(body_obj, separators=(",", ":")).encode("utf-8")
+        # Rebuild headers: drop payment-required + content-length,
+        # then add the patched versions + tracer.
+        new_headers = []
+        for name, value in headers:
+            lower = name.lower()
+            if lower == b"payment-required" or lower == b"content-length":
+                continue
+            new_headers.append((name, value))
+        new_headers.append((b"payment-required", new_header_value))
+        new_headers.append((b"content-length", str(len(new_body)).encode("ascii")))
+        new_headers.append((b"x-x402-rewriter", REWRITER_VERSION.encode()))
 
-        # Rebuild response. Preserve everything except content-length
-        # (we'll set it fresh) and payment-required (we'll set it fresh).
-        new_headers = {
-            k: v
-            for k, v in response.headers.items()
-            if k.lower() not in ("content-length", "payment-required")
-        }
-        new_headers[header_name or "payment-required"] = new_header
-
-        return Response(
-            content=new_body,
-            status_code=response.status_code,
-            headers=new_headers,
-            media_type="application/json",
-        )
+        await send({**start, "headers": new_headers})
+        await send({"type": "http.response.body", "body": new_body, "more_body": False})
 
 
 # ─── Wireup ──────────────────────────────────────────────────────────
 def setup_x402_meta(app: FastAPI) -> None:
-    """Idempotent — guarded by a flag on the app instance."""
+    """Mount the OpenAPI factory + preflight middleware on the FastAPI
+    app. Idempotent. Does NOT mount the 402 response rewriter — that
+    needs to wrap `app` from the outside (see `wrap_with_rewriter` or
+    just do `app = X402ResourceRewriter(app)` at the very end of api.py).
+    """
     if getattr(app.state, "_x402_meta_installed", False):
         log.info("x402_meta already installed, skipping")
         return
-    # Order matters: Preflight FIRST (so OPTIONS short-circuits before
-    # any auth middleware sees it); ResourceInjection LAST in the
-    # outer-to-inner sense, which in Starlette means added LAST.
     app.add_middleware(X402PreflightMiddleware)
-    app.add_middleware(X402ResourceInjectionMiddleware)
     app.openapi = custom_openapi_factory(app)
     app.state._x402_meta_installed = True
     log.info(
-        "x402_meta installed: %d paid endpoints, %d accepts entries",
+        "x402_meta installed: %d paid endpoints, %d accepts entries (rewriter mounted separately)",
         len(PAID_ENDPOINTS),
         len(ACCEPTS_TEMPLATE),
     )
+
+
+def wrap_with_rewriter(app):
+    """Convenience: returns the app wrapped in `X402ResourceRewriter`.
+    Equivalent to `app = X402ResourceRewriter(app)` — exists so callers
+    can do `app = wrap_with_rewriter(app)` for readability."""
+    return X402ResourceRewriter(app)

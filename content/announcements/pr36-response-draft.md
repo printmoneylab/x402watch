@@ -8,7 +8,7 @@ applied, then paste into the PR.
 
 ---
 
-Thanks @TateLyman for the careful audit. Addressed all three findings in commit `<<COMMIT_SHA>>`:
+Thanks @TateLyman for the careful audit. Addressed all three findings in commit `<<COMMIT_SHA>>` (v2 of the patch — v1 had a `BaseHTTPMiddleware`-based response rewriter that didn't fire on production 402s because the facilitator finalises the response outside the user-middleware chain; v2 uses a pure ASGI middleware wrapped around `app` from the outside, which is guaranteed to be the outermost piece of the stack).
 
 1. **OpenAPI now declares the paid x402 endpoints with `x-payment-info` + `responses.402`.** Free routes get an explicit `security: []`. Added `info.x-guidance` and a top-level `x-discovery` block with ownership proofs. All wired through a `custom_openapi` factory in `app/x402_meta.py` so the metadata stays in source-controlled config rather than scattered across route decorators.
 

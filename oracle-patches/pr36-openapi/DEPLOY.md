@@ -55,24 +55,36 @@ venv/bin/python -c "from app.x402_meta import setup_x402_meta, PAID_ENDPOINTS; p
 
 ## 3. Wire it up in `app/api.py`
 
-Open `/home/ubuntu/x402watch/app/api.py` and add this near the bottom
-of the file, **after all `app.add_middleware(...)` calls and after every
-`@app.get / @app.post / app.include_router(...)`** so the OpenAPI schema
-builder sees every route. The placement matters — preflight middleware
-must wrap CORSMiddleware, not the other way around.
+Open `/home/ubuntu/x402watch/app/api.py` and add this **at the very
+bottom of the file**, after every `app.add_middleware(...)`, every
+`@app.get / @app.post`, every `app.include_router(...)`, and every
+other module-level assignment of `app`:
 
 ```python
 # PR #36 reviewer feedback — paid-endpoint OpenAPI + accepts.resource
 # parity + POST preflight. See oracle-patches/pr36-openapi/.
-from app.x402_meta import setup_x402_meta
-setup_x402_meta(app)
+from app.x402_meta import setup_x402_meta, X402ResourceRewriter
+setup_x402_meta(app)             # OpenAPI x-payment-info + OPTIONS preflight
+app = X402ResourceRewriter(app)  # ASGI wrapper — outermost, guarantees 402 rewrite
 ```
 
-That's it. `setup_x402_meta` is idempotent — re-running it on a hot-reload is a no-op.
+The order matters and the **final line must reassign `app`**. uvicorn
+loads `app.api:app` at import time, so whatever `app` points to at the
+end of the module is what handles requests. Wrapping it in
+`X402ResourceRewriter` outside the FastAPI stack guarantees the
+middleware sits outside the facilitator middleware, CORS middleware,
+and exception handlers — the previous v1 wireup used a
+`BaseHTTPMiddleware` for this and it did not fire on the live 402
+because the facilitator finalised the response before the dispatcher
+saw it. v2 fixes that with pure ASGI buffering.
+
+`setup_x402_meta` is idempotent. Calling `X402ResourceRewriter(app)`
+more than once would double-wrap — only do it once at the end of the
+module.
 
 If `app/api.py` and `app/main.py` both exist and the FastAPI app is
-constructed in `main.py`, add the same two lines to `main.py` instead
-(only one location needs it, but it must be the file that exports `app`).
+constructed in `main.py`, add the same three lines to `main.py`
+instead — but only in the file that exports `app`.
 
 ---
 
@@ -82,7 +94,14 @@ constructed in `main.py`, add the same two lines to `main.py` instead
 sudo systemctl restart x402watch-api
 sudo systemctl status x402watch-api --no-pager | head -20
 sudo journalctl -u x402watch-api -n 30 --no-pager | grep -E "x402_meta|ERROR|startup"
-# expect: "x402_meta installed: 5 paid endpoints, 2 accepts entries"
+# expect: "x402_meta installed: 5 paid endpoints, 2 accepts entries (rewriter mounted separately)"
+
+# Two-second check that the ASGI rewriter is in the chain — every
+# response gets `X-X402-Rewriter: v2.1` (or `v2.1-noop` on responses
+# that aren't 402s). If the tracer header is missing, X402ResourceRewriter
+# is not the outermost — re-read step 3.
+curl -s -I "https://api.x402.printmoneylab.com/api/v1/health" | grep -i x-x402-rewriter
+# expect: x-x402-rewriter: v2.1
 ```
 
 Quick local smoke (no internet round-trip):

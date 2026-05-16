@@ -8,7 +8,7 @@ applied, then paste into the PR.
 
 ---
 
-Thanks @TateLyman for the careful audit. Addressed all three findings in commit `<<COMMIT_SHA>>` (v2 of the patch — v1 had a `BaseHTTPMiddleware`-based response rewriter that didn't fire on production 402s because the facilitator finalises the response outside the user-middleware chain; v2 uses a pure ASGI middleware wrapped around `app` from the outside, which is guaranteed to be the outermost piece of the stack).
+Thanks @TateLyman for the careful audit. Addressed all four findings in commit `<<COMMIT_SHA>>` (v2.2 of the patch — v1's `BaseHTTPMiddleware` rewriter never fired because the facilitator finalises 402s outside the user-middleware chain; v2.1 moved to a pure ASGI middleware wrapped around `app` from the outside so it's guaranteed to be the outermost piece of the stack; v2.2 also injects the CORS triple browsers need to read 402 bodies — see "Browser CORS on 402" below).
 
 1. **OpenAPI now declares the paid x402 endpoints with `x-payment-info` + `responses.402`.** Free routes get an explicit `security: []`. Added `info.x-guidance` and a top-level `x-discovery` block with ownership proofs. All wired through a `custom_openapi` factory in `app/x402_meta.py` so the metadata stays in source-controlled config rather than scattered across route decorators.
 
@@ -87,6 +87,26 @@ Findings: P2 - check challenge does not repeat the resource URL ...
 ```
 
 Expected: `L4_GUIDANCE_MISSING` resolved (now have `info.x-guidance`); `L2_AUTH_MODE_MISSING` resolved for paid routes (now have `x-payment-info`) and for free routes (now have `security: []`).
+
+### Browser CORS on 402
+
+The OPTIONS preflight already echoed `Access-Control-Allow-Origin` (v2.1), but the actual 402 response was missing the header — so the preflight passed but a browser `fetch()` couldn't read the body or the `payment-required` header. v2.2 of the rewriter handles this in the same place it patches the challenge:
+
+```
+$ curl -s -D - -o /dev/null \
+    "https://api.x402.printmoneylab.com/api/v1/services/833049/wash-detail" \
+    -H "Origin: https://x402.printmoneylab.com" \
+  | grep -iE "^(access-control|x-x402-rewriter):"
+```
+
+**Before (v2.1):** none of these headers present on the 402.
+
+**After (v2.2):**
+```
+<<AFTER PATCH: paste the CORS header lines here>>
+```
+
+Expected: `access-control-allow-origin` echoes the request Origin (`*` if none sent — keeps curl-from-terminal usable for testing), `access-control-expose-headers: payment-required, x-x402-rewriter`, and `vary:` includes `Origin`. 2xx responses are unaffected and still go through the existing `CORSMiddleware`.
 
 ### Regression — existing paid flow
 

@@ -154,3 +154,4 @@ next-env.d.ts
 *.key
 secrets/
 .DS_Store
+__pycache__/

@@ -307,7 +307,13 @@ class X402PreflightMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-REWRITER_VERSION = "v2.1"
+REWRITER_VERSION = "v2.2"
+
+# CORS headers attached to 402 responses so browser clients can read
+# the body and the payment-required header. The facilitator emits 402s
+# outside the FastAPI user-middleware chain, so the existing
+# CORSMiddleware never gets to inject these — we have to do it here.
+ACAO_EXPOSE_HEADERS = "payment-required, x-x402-rewriter"
 
 
 class X402ResourceRewriter:
@@ -330,8 +336,15 @@ class X402ResourceRewriter:
     middleware, exception handlers, and anything else — so it always
     sees the final outgoing response.
 
-    Adds `X-X402-Rewriter: v2.1` to every response it touches so the
+    Adds `X-X402-Rewriter: v2.2` to every response it touches so the
     wiring can be verified in two seconds with `curl -I`.
+
+    v2.2: on 402 responses, also injects the CORS triple browsers need
+    to actually read the body and the `payment-required` header —
+    Access-Control-Allow-Origin (echoes the request Origin), Vary:
+    Origin, Access-Control-Expose-Headers. The existing CORSMiddleware
+    handles 2xx fine but never sees 402s because the facilitator emits
+    them outside the user-middleware chain.
     """
 
     def __init__(self, app):
@@ -341,6 +354,13 @@ class X402ResourceRewriter:
         if scope.get("type") != "http":
             return await self.app(scope, receive, send)
 
+        # Capture request Origin so we can echo it back on the 402.
+        request_origin: Optional[bytes] = None
+        for name, value in scope.get("headers") or []:
+            if name.lower() == b"origin":
+                request_origin = value
+                break
+
         # Per-request state. We only intercept (buffer the body) when
         # the response is a 402; everything else streams through.
         state = {
@@ -348,6 +368,7 @@ class X402ResourceRewriter:
             "intercept": False,
             "body_chunks": [],
             "tracer_sent": False,
+            "origin": request_origin,
         }
 
         async def send_wrapper(message):
@@ -382,10 +403,47 @@ class X402ResourceRewriter:
 
         await self.app(scope, receive, send_wrapper)
 
+    @staticmethod
+    def _inject_cors(headers: list, origin: Optional[bytes]) -> list:
+        """Append the CORS triple browsers need to read a 402 body +
+        the payment-required header. Idempotent — drops any existing
+        Access-Control-Allow-Origin / Expose-Headers so we don't
+        duplicate when an inner middleware also set them."""
+        kept = []
+        seen_vary = None
+        for name, value in headers:
+            lower = name.lower()
+            if lower in (b"access-control-allow-origin",
+                         b"access-control-expose-headers"):
+                continue
+            if lower == b"vary":
+                seen_vary = value
+                continue
+            kept.append((name, value))
+        # Echo Origin when present (safer than wildcarding with
+        # potentially credentialed requests). Fall back to "*" so
+        # non-browser tools still see a permissive header for testing.
+        acao = origin if origin else b"*"
+        kept.append((b"access-control-allow-origin", acao))
+        kept.append((b"access-control-expose-headers",
+                     ACAO_EXPOSE_HEADERS.encode("ascii")))
+        # Preserve / extend Vary so caches respect the per-Origin
+        # variation we just introduced.
+        vary_parts = []
+        if seen_vary:
+            for part in seen_vary.split(b","):
+                p = part.strip()
+                if p and p.lower() != b"origin":
+                    vary_parts.append(p)
+        vary_parts.append(b"Origin")
+        kept.append((b"vary", b", ".join(vary_parts)))
+        return kept
+
     async def _rewrite_and_send(self, state, send):
         start = state["start"] or {}
         headers = list(start.get("headers") or [])
         body_bytes = b"".join(state["body_chunks"])
+        origin = state.get("origin")
 
         pr_value: Optional[bytes] = None
         for name, value in headers:
@@ -412,8 +470,10 @@ class X402ResourceRewriter:
                 pass
 
         if challenge is None:
-            # Nothing to patch — pass through unchanged.
-            new_headers = headers + [(b"x-x402-rewriter", b"v2.1-noop")]
+            # Nothing to patch in the body, but we still need CORS on
+            # the 402 so browsers can read whatever IS there.
+            new_headers = self._inject_cors(headers, origin)
+            new_headers.append((b"x-x402-rewriter", f"{REWRITER_VERSION}-noop".encode()))
             await send({**start, "headers": new_headers})
             await send({"type": "http.response.body", "body": body_bytes, "more_body": False})
             return
@@ -438,7 +498,7 @@ class X402ResourceRewriter:
         new_body = json.dumps(challenge, separators=(",", ":")).encode("utf-8")
 
         # Rebuild headers: drop payment-required + content-length,
-        # then add the patched versions + tracer.
+        # then add the patched versions + CORS triple + tracer.
         new_headers = []
         for name, value in headers:
             lower = name.lower()
@@ -447,6 +507,7 @@ class X402ResourceRewriter:
             new_headers.append((name, value))
         new_headers.append((b"payment-required", new_header_value))
         new_headers.append((b"content-length", str(len(new_body)).encode("ascii")))
+        new_headers = self._inject_cors(new_headers, origin)
         new_headers.append((b"x-x402-rewriter", REWRITER_VERSION.encode()))
 
         await send({**start, "headers": new_headers})

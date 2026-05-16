@@ -97,11 +97,27 @@ sudo journalctl -u x402watch-api -n 30 --no-pager | grep -E "x402_meta|ERROR|sta
 # expect: "x402_meta installed: 5 paid endpoints, 2 accepts entries (rewriter mounted separately)"
 
 # Two-second check that the ASGI rewriter is in the chain — every
-# response gets `X-X402-Rewriter: v2.1` (or `v2.1-noop` on responses
-# that aren't 402s). If the tracer header is missing, X402ResourceRewriter
-# is not the outermost — re-read step 3.
+# response gets `X-X402-Rewriter: v2.2` (`v2.2-noop` for 402s with no
+# decodable challenge). If the tracer header is missing,
+# X402ResourceRewriter is not the outermost — re-read step 3.
 curl -s -I "https://api.x402.printmoneylab.com/api/v1/health" | grep -i x-x402-rewriter
-# expect: x-x402-rewriter: v2.1
+# expect: x-x402-rewriter: v2.2
+
+# CORS-on-402 check: 402 responses must carry Access-Control-Allow-Origin
+# (echoing the request Origin) + Access-Control-Expose-Headers covering
+# payment-required, so browser fetch() can read both the body and the
+# challenge header. The facilitator emits 402s outside the user-middleware
+# chain so the existing CORSMiddleware never injects these — v2.2 of the
+# rewriter does.
+curl -s -D - -o /dev/null \
+  "https://api.x402.printmoneylab.com/api/v1/services/833049/wash-detail" \
+  -H "Origin: https://x402.printmoneylab.com" \
+  | grep -iE "^(access-control|x-x402-rewriter):"
+# expect:
+#   access-control-allow-origin: https://x402.printmoneylab.com
+#   access-control-expose-headers: payment-required, x-x402-rewriter
+#   x-x402-rewriter: v2.2
+# plus a `Vary:` header that includes Origin.
 ```
 
 Quick local smoke (no internet round-trip):

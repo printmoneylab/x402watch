@@ -307,7 +307,7 @@ class X402PreflightMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-REWRITER_VERSION = "v2.2"
+REWRITER_VERSION = "v2.3"
 
 # CORS headers attached to 402 responses so browser clients can read
 # the body and the payment-required header. The facilitator emits 402s
@@ -336,7 +336,7 @@ class X402ResourceRewriter:
     middleware, exception handlers, and anything else — so it always
     sees the final outgoing response.
 
-    Adds `X-X402-Rewriter: v2.2` to every response it touches so the
+    Adds `X-X402-Rewriter: v2.3` to every response it touches so the
     wiring can be verified in two seconds with `curl -I`.
 
     v2.2: on 402 responses, also injects the CORS triple browsers need
@@ -345,10 +345,29 @@ class X402ResourceRewriter:
     Origin, Access-Control-Expose-Headers. The existing CORSMiddleware
     handles 2xx fine but never sees 402s because the facilitator emits
     them outside the user-middleware chain.
+
+    v2.3: transparent attribute delegation to the wrapped FastAPI app
+    via `__getattr__`. Required because api.py reassigns the module-
+    global `app` to this wrapper at the bottom of the file (so uvicorn
+    loads the wrapped ASGI callable), but several handlers and the
+    payment-notification background task still reference the global
+    `app` for `app.state.redis`. Without delegation, those raise
+    `AttributeError: 'X402ResourceRewriter' object has no attribute
+    'state'` and the endpoint returns 500. `__getattr__` only fires
+    for misses on the wrapper, so `self.app` and `__call__` resolve
+    via normal lookup with no recursion risk.
     """
 
     def __init__(self, app):
         self.app = app
+
+    # Transparent proxy for attribute access — `app.state`, `app.openapi`,
+    # `app.router`, `app.dependency_overrides`, etc. all flow through to
+    # the wrapped FastAPI instance. `__getattr__` is invoked only when
+    # the attribute is missing on the wrapper, so `self.app` and
+    # `__call__` continue to resolve normally without recursion.
+    def __getattr__(self, name):
+        return getattr(self.app, name)
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http":

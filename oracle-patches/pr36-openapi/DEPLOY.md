@@ -97,11 +97,11 @@ sudo journalctl -u x402watch-api -n 30 --no-pager | grep -E "x402_meta|ERROR|sta
 # expect: "x402_meta installed: 5 paid endpoints, 2 accepts entries (rewriter mounted separately)"
 
 # Two-second check that the ASGI rewriter is in the chain — every
-# response gets `X-X402-Rewriter: v2.2` (`v2.2-noop` for 402s with no
+# response gets `X-X402-Rewriter: v2.3` (`v2.3-noop` for 402s with no
 # decodable challenge). If the tracer header is missing,
 # X402ResourceRewriter is not the outermost — re-read step 3.
 curl -s -I "https://api.x402.printmoneylab.com/api/v1/health" | grep -i x-x402-rewriter
-# expect: x-x402-rewriter: v2.2
+# expect: x-x402-rewriter: v2.3
 
 # CORS-on-402 check: 402 responses must carry Access-Control-Allow-Origin
 # (echoing the request Origin) + Access-Control-Expose-Headers covering
@@ -116,8 +116,21 @@ curl -s -D - -o /dev/null \
 # expect:
 #   access-control-allow-origin: https://x402.printmoneylab.com
 #   access-control-expose-headers: payment-required, x-x402-rewriter
-#   x-x402-rewriter: v2.2
+#   x-x402-rewriter: v2.3
 # plus a `Vary:` header that includes Origin.
+
+# Attribute delegation check (v2.3) — handlers that read app.state.redis
+# from the module-global `app` (now a wrapper) need __getattr__ to
+# proxy through to the inner FastAPI. If this fails, every 200 path
+# that touches Redis returns 500.
+ssh ubuntu@168.138.195.65 \
+  "cd /home/ubuntu/x402watch && venv/bin/python -c '
+from app.api import app
+print(\"type:\", type(app).__name__)
+print(\"has state:\", hasattr(app, \"state\"))
+print(\"has state.redis attr:\", hasattr(app.state, \"redis\") or \"set at lifespan startup\")
+'"
+# expect: type: X402ResourceRewriter, has state: True
 ```
 
 Quick local smoke (no internet round-trip):

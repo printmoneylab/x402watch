@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
 """
-Apply FastMCP request-context extraction to app/mcp_server.py.
+Apply FastMCP Context injection to app/mcp_server.py.
 
 Permanent location: /home/ubuntu/x402watch/scripts/apply_mcp_context.py
 
-Three edits, all idempotent:
+v2 (2026-05-19) — replaces the v1 ASGI-middleware approach that broke
+on FastMCP 3.2.4 (no streamable_http_app()). v2 uses FastMCP's
+documented Context injection: each tool gets a `ctx: Context = None`
+parameter, FastMCP fills it per request, and our helper extracts
+UA / IP from it.
 
-  1. +import line for the two contextvar getters
-  2. _track() reads UA/IP from contextvars and passes them to the
-     stats write + notify_mcp_tool call (was empty string before).
-  3. The `if __name__ == "__main__":` block changes from
-        mcp.run(transport="streamable-http", ...)
-     to
-        app = MCPRequestContextMiddleware(mcp.streamable_http_app(path="/mcp"))
-        uvicorn.run(app, host=..., port=port)
-     so the contextvar middleware actually wraps the ASGI app.
+The Context type annotation excludes the parameter from the JSON-RPC
+input schema, so clients (Cursor / Smithery / Claude Desktop) see the
+exact same tool signatures as before.
+
+Twelve idempotent patches:
+  1. +imports: Context (from fastmcp) + extract_request_info
+  2. _track() body: reads ua/ip from ctx, passes to classifier + alerter
+  3-7. Five tool signatures gain `ctx: Context = None`
+  8-12. Five _track call sites pass `ctx=ctx`
+
+Anchor strategy: replacement-string-in-source checked BEFORE anchor
+match, same as apply_wireup.py. Re-runs are no-ops; missing anchor
+bails the whole apply (no partial writes).
 
 Pre-flight:
-  - Confirm FastMCP 3.x exposes `streamable_http_app`. If your version
-    uses a different accessor (`http_app`, `sse_app`, etc.) the
-    `if __name__` patch will fail with "ANCHOR MISSING" instead of
-    silently writing broken code — investigate before re-running.
+    venv/bin/python -c 'from fastmcp import Context; print(Context)'
+    # must succeed before --apply
 
 Usage:
     cd /home/ubuntu/x402watch
-    venv/bin/python scripts/apply_mcp_context.py           # dry-run
-    venv/bin/python scripts/apply_mcp_context.py --apply   # write + verify
+    venv/bin/python scripts/apply_mcp_context.py            # dry-run
+    venv/bin/python scripts/apply_mcp_context.py --apply    # write
 
-Rollback: each --apply writes a timestamped .bak.mcp-context-* file.
+Rollback: each --apply leaves a .bak.mcp-context-v2-* timestamped backup.
 """
 from __future__ import annotations
 
@@ -41,25 +47,24 @@ from pathlib import Path
 ROOT = Path("/home/ubuntu/x402watch")
 MCP = ROOT / "app" / "mcp_server.py"
 KST = timezone(timedelta(hours=9))
-BAK_TAG = "mcp-context-" + datetime.now(KST).strftime("%Y%m%d-%H%M")
+BAK_TAG = "mcp-context-v2-" + datetime.now(KST).strftime("%Y%m%d-%H%M")
 
 
-# (1) Imports — placed right after the existing alerts-wireup imports.
+# (1) Imports — appended to the alerts-wireup import block.
 PATCH_IMPORTS = (
     "from app.mcp_payment_hint import FREE_TOOL_TAGLINE as _FREE_TAGLINE  # noqa: F401\n",
     "from app.mcp_payment_hint import FREE_TOOL_TAGLINE as _FREE_TAGLINE  # noqa: F401\n"
-    "# FastMCP context bridge — read real UA/IP per request via contextvars.\n"
-    "from app.mcp_context import (\n"
-    "    MCPRequestContextMiddleware as _MCPCtxMW,\n"
-    "    get_request_ua as _get_ua,\n"
-    "    get_request_ip as _get_ip,\n"
-    ")\n"
-    "import uvicorn as _uvicorn\n",
+    "# FastMCP Context injection — tool funcs gain ctx: Context = None,\n"
+    "# FastMCP fills it per request; extract_request_info pulls UA + IP.\n"
+    "from fastmcp import Context\n"
+    "from app.mcp_context import extract_request_info as _extract_request_info\n",
 )
 
 
-# (2) _track() — replace the empty-string UA/IP with contextvar reads.
+# (2) _track() body — pull ua/ip from ctx instead of using empty strings.
 PATCH_TRACK = (
+    "def _track(tool_name: str) -> None:\n"
+    "    # x402watch alerts hardening — always-on stats for the daily digest.\n"
     "    _stats_write({\n"
     "        \"kind\": \"mcp_call\",\n"
     "        \"tool\": tool_name,\n"
@@ -75,8 +80,11 @@ PATCH_TRACK = (
     "        ip=\"\", user_agent=\"\",\n"
     "        is_paid_tool=False,\n"
     "    ))\n",
-    "    _ua = _get_ua()\n"
-    "    _ip = _get_ip()\n"
+    "def _track(tool_name: str, ctx=None) -> None:\n"
+    "    # x402watch alerts hardening — always-on stats for the daily digest.\n"
+    "    # ctx is the FastMCP Context (or None when caller didn't forward it);\n"
+    "    # extract_request_info degrades to (\"\",\"\") if anything is missing.\n"
+    "    _ua, _ip = _extract_request_info(ctx)\n"
     "    _stats_write({\n"
     "        \"kind\": \"mcp_call\",\n"
     "        \"tool\": tool_name,\n"
@@ -84,9 +92,8 @@ PATCH_TRACK = (
     "        \"ua\": _ua,\n"
     "        \"ip\": _ip,\n"
     "    })\n"
-    "    # Tier-aware alert — real UA from contextvar populated by\n"
-    "    # MCPRequestContextMiddleware. T0 fallback if the middleware\n"
-    "    # ever fails to populate (graceful degradation).\n"
+    "    # Tier-aware alert — real UA from the per-request FastMCP Context.\n"
+    "    # T0 fallback if ctx is None or strips out (graceful degradation).\n"
     "    asyncio.create_task(_notify_mcp_tool(\n"
     "        tool_name=tool_name,\n"
     "        classification=_classify(_ua),\n"
@@ -96,28 +103,95 @@ PATCH_TRACK = (
 )
 
 
-# (3) Runner — replace mcp.run() with explicit uvicorn.run() of the
-#     wrapped ASGI app. Anchors on the full block so we don't match
-#     and re-wrap on a re-run.
-PATCH_RUNNER = (
-    "if __name__ == \"__main__\":\n"
-    "    port = int(os.environ.get(\"MCP_PORT\", \"8453\"))\n"
-    "    log.info(\"x402watch MCP starting on 0.0.0.0:%d (transport=streamable-http, path=/mcp)\", port)\n"
-    "    mcp.run(transport=\"streamable-http\", host=\"0.0.0.0\", port=port, path=\"/mcp\")\n",
-    "if __name__ == \"__main__\":\n"
-    "    port = int(os.environ.get(\"MCP_PORT\", \"8453\"))\n"
-    "    log.info(\"x402watch MCP starting on 0.0.0.0:%d (transport=streamable-http, path=/mcp, ctx=on)\", port)\n"
-    "    # Wrap FastMCP's ASGI app with the context-extracting middleware\n"
-    "    # so _track() sees real UA / IP per request. If FastMCP renames\n"
-    "    # streamable_http_app() in a future version, fall back to\n"
-    "    # mcp.run(...) (graceful degrade — Tier 0 unknown).\n"
-    "    _asgi_app = mcp.streamable_http_app(path=\"/mcp\")\n"
-    "    _asgi_app = _MCPCtxMW(_asgi_app)\n"
-    "    _uvicorn.run(_asgi_app, host=\"0.0.0.0\", port=port)\n",
+# (3-7) Tool signatures — add `ctx: Context = None` parameter.
+# Anchors are unique per tool because each closes with a distinct
+# combination of preceding text + `) -> dict:`.
+PATCH_SIG_CATEGORIES = (
+    "async def x402_get_categories() -> dict:\n",
+    "async def x402_get_categories(ctx: Context = None) -> dict:\n",
+)
+PATCH_SIG_SERVICE = (
+    "async def x402_get_service(\n"
+    "    service_id: int = Field(\n"
+    "        description=\"Numeric x402 service id (visible in /services list and detail URLs).\"\n"
+    "    ),\n"
+    ") -> dict:\n",
+    "async def x402_get_service(\n"
+    "    service_id: int = Field(\n"
+    "        description=\"Numeric x402 service id (visible in /services list and detail URLs).\"\n"
+    "    ),\n"
+    "    ctx: Context = None,\n"
+    ") -> dict:\n",
+)
+PATCH_SIG_WASH = (
+    "async def x402_check_wash(\n"
+    "    address: str = Field(\n"
+    "        default=\"\",\n"
+    "        description=\"Optional wallet or seller address. When provided, the response includes a hint about the paid per-address endpoint.\",\n"
+    "    ),\n"
+    ") -> dict:\n",
+    "async def x402_check_wash(\n"
+    "    address: str = Field(\n"
+    "        default=\"\",\n"
+    "        description=\"Optional wallet or seller address. When provided, the response includes a hint about the paid per-address endpoint.\",\n"
+    "    ),\n"
+    "    ctx: Context = None,\n"
+    ") -> dict:\n",
+)
+PATCH_SIG_SEARCH = (
+    "    page_size: int = Field(\n"
+    "        default=24, description=\"Page size (max 200; default 24).\"\n"
+    "    ),\n"
+    ") -> dict:\n",
+    "    page_size: int = Field(\n"
+    "        default=24, description=\"Page size (max 200; default 24).\"\n"
+    "    ),\n"
+    "    ctx: Context = None,\n"
+    ") -> dict:\n",
+)
+PATCH_SIG_TRENDS = (
+    "async def x402_get_trends() -> dict:\n",
+    "async def x402_get_trends(ctx: Context = None) -> dict:\n",
 )
 
 
-PATCHES = [PATCH_IMPORTS, PATCH_TRACK, PATCH_RUNNER]
+# (8-12) _track call sites — pass ctx=ctx.
+PATCH_CALL_CATEGORIES = (
+    "    _track(\"x402_get_categories\")\n",
+    "    _track(\"x402_get_categories\", ctx=ctx)\n",
+)
+PATCH_CALL_SERVICE = (
+    "    _track(\"x402_get_service\")\n",
+    "    _track(\"x402_get_service\", ctx=ctx)\n",
+)
+PATCH_CALL_WASH = (
+    "    _track(\"x402_check_wash\")\n",
+    "    _track(\"x402_check_wash\", ctx=ctx)\n",
+)
+PATCH_CALL_SEARCH = (
+    "    _track(\"x402_search_services\")\n",
+    "    _track(\"x402_search_services\", ctx=ctx)\n",
+)
+PATCH_CALL_TRENDS = (
+    "    _track(\"x402_get_trends\")\n",
+    "    _track(\"x402_get_trends\", ctx=ctx)\n",
+)
+
+
+PATCHES = [
+    PATCH_IMPORTS,
+    PATCH_TRACK,
+    PATCH_SIG_CATEGORIES,
+    PATCH_SIG_SERVICE,
+    PATCH_SIG_WASH,
+    PATCH_SIG_SEARCH,
+    PATCH_SIG_TRENDS,
+    PATCH_CALL_CATEGORIES,
+    PATCH_CALL_SERVICE,
+    PATCH_CALL_WASH,
+    PATCH_CALL_SEARCH,
+    PATCH_CALL_TRENDS,
+]
 
 
 def apply(path: Path, patches, dry_run: bool):
@@ -147,25 +221,47 @@ def apply(path: Path, patches, dry_run: bool):
     return True, notes
 
 
+def preflight() -> bool:
+    """Sanity-check fastmcp.Context import. Without this, --apply would
+    write a file that fails to start with ImportError."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from fastmcp import Context  # noqa: F401
+        return True
+    except Exception as e:
+        print(f"  ✗ preflight FAILED: cannot import fastmcp.Context: {e}")
+        print("    The patcher would write code that fails on import.")
+        print("    Investigate before retrying. Hint:")
+        print("      venv/bin/python -c 'import fastmcp; print(dir(fastmcp))'")
+        return False
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--apply", action="store_true",
                    help="write changes (default: dry-run)")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="bypass fastmcp.Context import check")
     args = p.parse_args()
     dry_run = not args.apply
 
-    print(f"== FastMCP context bridge — {'APPLY' if not dry_run else 'DRY RUN'} ==")
+    print(f"== FastMCP Context injection — {'APPLY' if not dry_run else 'DRY RUN'} (v2) ==")
     print(f"   target: {MCP}")
     print()
+
+    if not args.skip_preflight:
+        print("[preflight] fastmcp.Context import")
+        if not preflight():
+            return 2
+        print("  ✓ Context import OK")
+        print()
 
     ok, notes = apply(MCP, PATCHES, dry_run)
     print("\n".join(notes))
 
     if not ok:
         print()
-        print("FAIL — at least one anchor not found.")
-        print("If your FastMCP version doesn't expose streamable_http_app(),")
-        print("inspect: venv/bin/python -c 'import fastmcp; help(fastmcp.FastMCP)'")
+        print("FAIL — at least one anchor not found. Nothing written.")
         return 1
 
     if not dry_run:

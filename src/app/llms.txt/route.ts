@@ -26,6 +26,35 @@ x402watch indexes 36,000+ x402 services across 4 chains (Base, Solana, Polygon, 
 - Source code: https://github.com/printmoneylab/x402watch
 - Methodology: ${SITE_URL}/wash-report
 
+## What makes x402watch different
+
+x402watch is not a generic indexer. It's a wash-filtered intelligence
+layer for the x402 ecosystem.
+
+Key differentiators:
+
+- 4-layer wash detection algorithm (v2.0, 2026-04-30): per-seller flags
+  → per-(buyer, seller) labels → global guards → tx-weighted majority
+  for the global buyer label.
+- 9-label buyer taxonomy (organic_user, ai_agent, self_test,
+  suspected_wash, owner_test, exchange_user, verifier, analytics_bot,
+  developer).
+- Per-(buyer, seller) labels — the same buyer can be labelled
+  differently on different services.
+- Open methodology — every threshold and rule public at
+  ${SITE_URL}/docs/methodology.
+- Dispute system — false positives can be reported via POST /api/disputes;
+  ≥ 5 independent reports auto-trigger a recompute on the next daily run.
+
+Verified false-positive resolution: KR Crypto kr-prices went from 96.4%
+suspected_wash → 0%. Verified true-positive retention: Aubrai 99.98% wash.
+
+For merchants: audit your own buyer traffic with the same intelligence
+layer used across the entire x402 ecosystem.
+
+For AI agents: verify endpoint quality before auto-spending — wash-
+filtered data prevents budget loss on fake-traffic endpoints.
+
 ## API Endpoints (Free)
 
 ### GET /api/v1/landing-stats
@@ -49,22 +78,64 @@ Daily trends: new services, volume movers, hot services.
 ### GET /api/v1/wash-report
 Aggregate wash detection: label distribution, anonymized case studies.
 
+### GET /api/v1/disputes/buyer/{address}
+Public dispute counts (total, pending, reviewed, resolved) for a buyer wallet.
+
+## Paid Endpoints (x402 micropayments)
+
+All paid endpoints accept USDC on Base or Solana mainnet. Replay with
+the \`X-Payment: <signed-payload>\` header after the 402 challenge.
+
+| Endpoint | Method | Price | Returns |
+| --- | --- | --- | --- |
+| /api/v1/services/{id}/wash-detail | GET | $0.005 | Top 50 buyers with full label classification, confidence scores, signal-by-signal breakdown. |
+| /api/v1/services/{id}/transactions | GET | $0.010 | Full transaction history for a service (paginated). |
+| /api/v1/categories/{cat}/full-history | GET | $0.020 | Full daily time-series and label distribution for a category. |
+| /api/v1/wash/check | POST | $0.050 | On-demand wash-filter evaluation of an arbitrary (buyer, seller) pair. |
+| /api/v1/buyers/{address}/profile | GET | $0.005 | Global label + per-pair breakdown + dispute count for a buyer wallet. |
+
+## How AI agents pay
+
+1. Install an x402 client: AgentCash, Pay.sh, or the official x402 SDK.
+2. Fund a wallet with USDC on Base or Solana mainnet (≥ price for the call).
+3. GET / POST the endpoint to receive a 402 with a \`payment-required\` header
+   (base64-encoded JSON challenge) plus an identical challenge in the body.
+4. Sign the payment via the facilitator and replay with the \`X-Payment\`
+   header. Successful responses return the actual paid payload.
+
+## Merchant Wallets
+
+- Base:   0xcF9223eCe895258dEa8D288AEBcf846Ab8E342fB
+- Solana: 3Ywxk31SvWKwZBdY6bLvjmn5h4mzWcT3HJ5UZbYXoVy9
+
+## Browser CORS support
+
+402 responses carry \`Access-Control-Allow-Origin\` (echoes the request Origin),
+\`Access-Control-Expose-Headers: payment-required, x-x402-rewriter\`, and
+\`Vary: Origin\`, so browser \`fetch()\` clients can read both the body and the
+challenge header. POST endpoints (e.g. /api/v1/wash/check) support OPTIONS
+preflight with \`Access-Control-Allow-Methods: GET, POST, OPTIONS\`.
+
 ## Classification Labels
 
-Each x402 buyer is classified into one of 8 mutually-exclusive labels:
+Each (buyer, seller) pair is classified into one of 9 mutually-exclusive labels:
 
-- exchange_user: Funded from CEX hot wallet
-- self_test: Operator test traffic
-- verifier: Catalog crawler bot
-- analytics_bot: Established research bot
-- ai_agent: Multi-purpose AI agent (organic)
-- developer: Single-service heavy bot
-- organic_user: Uncategorized organic
-- suspected_wash: Pattern-matched wash trading
+- exchange_user: Buyer wallet IS a labelled CEX hot wallet (whitelist match).
+- self_test: Operator validating their own endpoint.
+- verifier: Directory / discovery crawler bot.
+- analytics_bot: Established periodic data-scraping bot.
+- ai_agent: LLM-driven multi-service consumer.
+- developer: Single-service heavy bot / backtest burst.
+- organic_user: Default — none of the above signals fired strongly.
+- suspected_wash: Structural signals consistent with manufactured volume.
+- owner_test: Operator's whitelisted self-test wallets (excluded from rollup denominator).
+
+A buyer's global label is the tx-weighted majority across their pair labels.
 
 ## Wash Detection Methodology
 
-Cohort signals + vanity clustering + concentration analysis.
+v2.0 four-layer pipeline: per-seller flags → per-(buyer, seller) pair labels
+→ global-context guards → tx-weighted derivation of the global buyer label.
 Full methodology: ${SITE_URL}/docs/methodology
 
 ## MCP Server

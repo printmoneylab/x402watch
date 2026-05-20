@@ -29,34 +29,38 @@ service_id 14391.
 The fix
 =======
 Key the map by (lower(seller_address), amount_micro) where
-amount_micro = ROUND(price_amount * 1e6) — the integer micro-USDC
-value, which equals the raw `value` field of a USDC Transfer log
-(USDC = 6 decimals on Base and Solana). A service with NULL
+amount_micro = ROUND(price_amount * 1e6) — integer micro-USDC.
+parse_log holds the on-chain amount as a DOLLAR FLOAT (it already
+does `to_int(lg["data"]) / 10**USDC_DECIMALS`), so the lookup
+converts back with round(amount * 1e6). A service with NULL
 price_amount is keyed (addr, None) and acts as the fallback when an
 exact (addr, amount) match is absent.
 
 This is the *partial* fix. Same-price collisions inside one seller
 (KR Crypto has 4 endpoints at $0.001) still resolve to MIN(id) within
 the bucket. The merchant feed (Phase 2c) removes that residual loss.
+A payment whose amount is not exactly a registered price (e.g. the
+observed 0.001125 — facilitator fee? non-x402 transfer?) matches
+nothing and falls through to (addr, None); for KR Crypto, which has
+no NULL-price service, that yields service_id=None — correctly
+"unattributed" rather than wrongly bucketed.
 
 THREE patches, all required
 ===========================
   P1  load_seller_map()  — full-function replacement (exact source).
   P2  parse_log() signature — `seller_map` type annotation.
-  P3  parse_log() body lookup — `seller_map.get(<addr>)` →
-      `seller_map.get((<addr>, amount)) or seller_map.get((<addr>, None))`.
+  P3  parse_log() body lookup — `service_id = seller_map.get(to_addr)`
+      → tuple lookup with round(amount * 1e6) + (addr, None) fallback.
 
-P1 + P2 anchors are EXACT (built from Moa's paste). P3 is a best
-guess: it assumes the lookup is literally `seller_map.get(to_addr)`
-and that a raw-integer micro-USDC `amount` variable is in scope at
-that point. If the real parse_log uses a different variable name or
-a dollar-float amount, P3's anchor will not match and the patcher
-BAILS WITHOUT WRITING ANYTHING, then prints every `seller_map` /
-amount-looking line so the anchor can be finalised.
+All three anchors are EXACT — built from the real evm.py source Moa
+pasted (load_seller_map evm.py:162-172, parse_log signature 175-180,
+parse_log body 181-200). `amount` is in scope at the lookup line
+(assigned three lines above as the dollar float).
 
 The patcher is all-or-nothing: it never applies P1+P2 without P3,
 because a tuple-keyed map with a scalar lookup would null every
-attribution.
+attribution. On any anchor miss it BAILS WITHOUT WRITING and prints
+the seller_map / amount usage scan.
 
 Apply with:
     cd /home/ubuntu/x402watch
@@ -125,13 +129,20 @@ P2_ANCHOR = "    seller_map: dict[str, int],\n"
 P2_REPLACEMENT = "    seller_map: dict[tuple[str, int | None], int],\n"
 
 
-# ─── P3: parse_log body lookup (BEST GUESS) ─────────────────────────
-# Assumption: the lookup is literally `seller_map.get(to_addr)` and a
-# raw-integer micro-USDC `amount` variable is in scope. If wrong, the
-# patcher bails (see scan_seller_map_usage()).
-P3_ANCHOR = "seller_map.get(to_addr)"
+# ─── P3: parse_log body lookup ──────────────────────────────────────
+# Confirmed against the real parse_log body:
+#   amount = to_int(lg["data"]) / 10**USDC_DECIMALS      → dollar float
+#   service_id = seller_map.get(to_addr)
+# `amount` is a DOLLAR FLOAT (e.g. 0.001), not a raw integer, so we
+# convert back to micro-USDC with round(amount * 1e6) to match the
+# amount_micro integer keys built by load_seller_map (P1).
+# round() not int(): 0.001 * 1e6 == 1000.0000000000001 → 1000.
+P3_ANCHOR = "service_id = seller_map.get(to_addr)"
 P3_REPLACEMENT = (
-    "seller_map.get((to_addr, amount)) or seller_map.get((to_addr, None))"
+    "service_id = (\n"
+    "            seller_map.get((to_addr, round(amount * 1_000_000)))\n"
+    "            or seller_map.get((to_addr, None))\n"
+    "        )"
 )
 
 

@@ -45,22 +45,30 @@ nothing and falls through to (addr, None); for KR Crypto, which has
 no NULL-price service, that yields service_id=None — correctly
 "unattributed" rather than wrongly bucketed.
 
-THREE patches, all required
-===========================
+FOUR patches, all required
+==========================
   P1  load_seller_map()  — full-function replacement (exact source).
   P2  parse_log() signature — `seller_map` type annotation.
   P3  parse_log() body lookup — `service_id = seller_map.get(to_addr)`
       → tuple lookup with round(amount * 1e6) + (addr, None) fallback.
+  P4  index_chain() padded_sellers — `seller_map.keys()` now yields
+      (addr, amount_micro) tuples; pull just the distinct addresses
+      with `{k[0] for k in seller_map.keys()}` for the getLogs topics
+      filter.
 
-All three anchors are EXACT — built from the real evm.py source Moa
+All four anchors are EXACT — built from the real evm.py source Moa
 pasted (load_seller_map evm.py:162-172, parse_log signature 175-180,
-parse_log body 181-200). `amount` is in scope at the lookup line
-(assigned three lines above as the dollar float).
+parse_log body 181-200, index_chain padded_sellers ~L250/264).
 
-The patcher is all-or-nothing: it never applies P1+P2 without P3,
-because a tuple-keyed map with a scalar lookup would null every
-attribution. On any anchor miss it BAILS WITHOUT WRITING and prints
-the seller_map / amount usage scan.
+P4 history: the first Phase 2b attempt shipped P1+P2+P3 only and
+regressed — index_chain crashed feeding tuple keys to
+pad_topic_address(). That is exactly what P4 fixes; it must ship
+together with P1-P3.
+
+The patcher is all-or-nothing: it never applies a subset, because a
+tuple-keyed map with any scalar consumer (lookup OR `.keys()` use)
+would crash the indexer. On any anchor miss it BAILS WITHOUT WRITING
+and prints the seller_map / amount usage scan.
 
 Apply with:
     cd /home/ubuntu/x402watch
@@ -146,10 +154,29 @@ P3_REPLACEMENT = (
 )
 
 
+# ─── P4: index_chain padded_sellers ─────────────────────────────────
+# The first Phase 2b attempt regressed here: after P1, seller_map keys
+# are (addr, amount_micro) tuples, but index_chain feeds each key
+# straight into pad_topic_address() — which calls .lower() on it →
+# `AttributeError: 'tuple' object has no attribute 'lower'`.
+# The getLogs topics filter only needs the distinct seller ADDRESSES;
+# the amount component is irrelevant there. `{k[0] for k in keys}` is a
+# set-comprehension: it pulls just the address and deduplicates a
+# seller that owns several price-tier keys down to one filter entry.
+P4_ANCHOR = (
+    "padded_sellers = [pad_topic_address(a) for a in seller_map.keys()]"
+)
+P4_REPLACEMENT = (
+    "padded_sellers = [pad_topic_address(addr) "
+    "for addr in {k[0] for k in seller_map.keys()}]"
+)
+
+
 PATCHES = [
     ("P1 load_seller_map", P1_ANCHOR, P1_REPLACEMENT),
     ("P2 parse_log signature", P2_ANCHOR, P2_REPLACEMENT),
     ("P3 parse_log lookup", P3_ANCHOR, P3_REPLACEMENT),
+    ("P4 index_chain padded_sellers", P4_ANCHOR, P4_REPLACEMENT),
 ]
 
 

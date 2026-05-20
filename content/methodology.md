@@ -1,7 +1,7 @@
 # x402watch — Wash-Filter Methodology
 
-**Version:** v2.0 (2026-04-30)
-**Status:** Production. Four-layer pipeline running daily on Oracle ARM (`indexer/seller_flags.py` → `indexer/pair_labels.py` → `indexer/derive_global.py`).
+**Version:** v2.1 (2026-05-20)
+**Status:** Production. Four-layer wash pipeline + a rebuilt attribution layer running daily on Oracle ARM.
 **Owner:** PrintMoneyLab
 **Context:** x402 ecosystem analytics. We separate real demand from artificial / self-generated traffic and report it transparently per service.
 
@@ -11,6 +11,7 @@
 
 ## Changelog
 
+- **v2.1 (2026-05-20) — attribution layer rebuild.** The v2.0 wash algorithm was correct but ran on collapsed inputs: the indexer mapped every payment to a seller's *oldest* `service_id` (`load_seller_map` keyed on `seller_address` alone, taking `MIN(id)`). Any operator running multiple endpoints under one wallet had all their traffic credited to one service. v2.1 rebuilds attribution in two layers — (1) a universal `(seller, chain, price)` key in the indexer, and (2) an opt-in **merchant feed** (`/.well-known/x402watch-feed.json`, Ed25519-signed) that gives exact per-payment `(tx_hash → endpoint)` mapping for merchants that publish one. Historical rows are backfilled; every transaction now carries an `attribution_source` provenance tag (`merchant_feed:<id>` / `price_match_backfill` / `legacy_unmatched` / `legacy_collapse`). See §11.
 - **v2.0 (2026-04-30) — four-layer redesign.** Replaced the single-pass global-buyer labeller with a four-layer pipeline: (1) per-seller flags, (2) per-(buyer, seller) pair labels, (3) multi-signal weighting with global guards, (4) global buyer labels derived from pair labels. Adds a 9th label `owner_test` for operator self-test traffic and excludes it from real-volume / suspected-wash denominators. Fixes the v1.x bug where a per-seller launch signal could label a single buyer `self_test` *globally*, blowing up `suspected_wash_pct` on unrelated services. Pre-redesign tables snapshotted to `*_pre_layer4_backup`; rollback path documented in `scripts/rollback_layer4.sh`.
 - **v1.2 (2026-04-30):** Reclassified 5 weakest categories under v1.1 prompt; cross-LLM agreement settled at 78.9% on a fresh 199-sample stratified validation.
 - **v1.1 (2026-04-30):** Added 4 seller-cohort wash-farm signals (uniform_amount, coordinated_start, uniform_tx_count, time_burst). Validated against aubr.ai (sybil farm) and KR Crypto (small-cohort self-test).
@@ -296,6 +297,56 @@ Phase 2 work is *non-blocking* for the v2.0 announcement — the algorithm and d
 
 ---
 
+## 11. Attribution layer (v2.1)
+
+### 11.1 The bug v2.1 fixes
+
+v2.0's wash algorithm was sound, but the layer beneath it — deciding *which service a given on-chain payment belongs to* — was wrong. The EVM indexer built its seller→service map as:
+
+```sql
+SELECT LOWER(seller_address) AS addr, MIN(id) AS service_id
+FROM services WHERE chain = $1
+GROUP BY LOWER(seller_address)
+```
+
+One seller wallet → one `service_id`. Any operator running multiple endpoints under a single wallet had **every** payment attributed to the oldest service they registered. On x402, the resource URL a buyer paid for lives only in the off-chain `X-Payment` HTTP header; the on-chain settlement (an EIP-3009 `transferWithAuthorization`) carries no resource field, so an outside indexer cannot recover it from the transaction alone.
+
+This silently distorted v2.0's per-service numbers. KR Crypto operates 11+ endpoints under one wallet; all of their traffic was credited to `kr-prices`. The same collapse applied to every multi-endpoint operator on the index.
+
+### 11.2 What we ruled out
+
+- **CDP / facilitator settlement-log API.** The `X402FacilitatorApi` surface (`verify`, `settle`, `discovery/resources`, `discovery/merchants`) has no past-settlement-log endpoint. There is no public feed of `(tx_hash → resource_url)`.
+- **On-chain calldata parsing.** EIP-3009 has no slot for a resource URL. Structurally impossible.
+
+### 11.3 The two-layer fix
+
+**Layer 1 — universal, partial.** The indexer now keys attribution on `(seller_address, chain, price)`. `amount_micro = ROUND(price_amount × 1e6)` is matched against the integer micro-USDC value of each payment. An operator's $0.05 endpoint is now distinguished from their $0.001 endpoint. *Limit:* two endpoints at the **same** price under one seller still collapse to `MIN(id)` within that price bucket — on-chain data cannot separate them.
+
+**Layer 2 — opt-in, exact.** Any merchant can publish an Ed25519-signed JSON ledger of their own settled payments at `/.well-known/x402watch-feed.json`. The indexer fetches it hourly, verifies the signature against a registered public key, and overwrites `service_id` per `tx_hash`. This resolves same-price collisions and recovers payments made on chains the indexer does not watch. Replay-protected by a monotonic `feed_seq`; settlement claims are cross-checked against the merchant's declared seller wallets.
+
+### 11.4 Provenance tagging
+
+Every `transactions` row now carries an `attribution_source`:
+
+| value | meaning |
+|---|---|
+| `merchant_feed:<id>` | exact — from a verified merchant feed |
+| `price_match_backfill` / price-keyed indexer write | `(seller, chain, price)` match; exact unless a same-price collision |
+| `legacy_unmatched` | seller wallet matched but no payment in the merchant feed — i.e. a non-x402 USDC transfer (CEX deposit, ad-hoc send); excluded from x402 traffic stats |
+| `legacy_collapse` | pre-v2.1 row not yet re-attributed (no exact price match: fee-included amount, or a since-changed price) |
+
+Nothing is ever hard-deleted; re-attribution is a column rewrite over a full `transactions_pre_v21_backup` snapshot.
+
+### 11.5 First adopter — KR Crypto
+
+KR Crypto shipped a merchant feed (key `kr-crypto-feed-2026-05-20`). Backfill result: **1,349** settlements attributed exactly across their 11+ endpoints, **2,464** non-x402 USDC transfers separated out as `legacy_unmatched`, and **56** Solana settlements recovered that the EVM indexer never saw. The real per-endpoint picture differs sharply from the v2.0 collapse — e.g. `kr-sentiment`, which read as zero traffic under v2.0, is in fact KR Crypto's top earner. The honest restatement: v2.0's "kr-prices 96.4% → 0% wash" headline was correct *for that `service_id` row*, but that row was the aggregate of 11 endpoints; v2.1 publishes the true per-endpoint split.
+
+### 11.6 Honesty about the limit
+
+For merchants who do **not** publish a feed, attribution is `(seller, chain, price)` best-effort: accurate when prices differ, collapsed within same-price buckets, and unable to distinguish a real x402 payment from a non-x402 transfer that happens to equal a registered price. Those rows are surfaced as such (`is_x402_payment` left unset). Exact attribution requires either a merchant feed or x402watch operating its own facilitator (Phase 3).
+
+---
+
 ## Appendix A. v1.x signal reference (historical)
 
 The signals below are the per-buyer heuristics from v1.0 / v1.1. Most are subsumed into Layer 1 seller flags or Layer 2 buyer features in v2.0. Documented here so that older changelogs, GitHub issues, and external citations remain interpretable.
@@ -341,4 +392,4 @@ A buyer in **both** tiers gets the strongest base confidence (0.95). Strict-only
 
 ---
 
-*Last updated: 2026-04-30. Methodology owner: PrintMoneyLab. Disputes: GitHub Issues under `dispute` / `label-review` labels.*
+*Last updated: 2026-05-20 (v2.1 attribution layer). Methodology owner: PrintMoneyLab. Disputes: in-product report button or GitHub Issues under `dispute` / `label-review` labels.*

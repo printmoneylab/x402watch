@@ -146,6 +146,8 @@ async def _notify_telegram(dispute_id: int, payload: DisputeIn, pending_for_buye
 @router.post(
     "/api/v1/internal/disputes",
     dependencies=[Depends(require_internal_token)],
+    include_in_schema=False,  # PR #138 P2 — internal, bearer-gated; keep
+                              # it out of the public agent-facing OpenAPI
 )
 async def create_dispute(
     payload: DisputeIn,
@@ -223,6 +225,7 @@ async def create_dispute(
 @router.get(
     "/api/v1/internal/disputes/list",
     dependencies=[Depends(require_internal_token)],
+    include_in_schema=False,  # PR #138 P2 — internal admin route
 )
 async def list_disputes(
     status: Optional[str] = Query(default=None),
@@ -265,8 +268,17 @@ async def list_disputes(
     }
 
 
-# ─── GET /disputes/buyer/{address} (public) ──────────────────────────
-@router.get("/api/v1/disputes/buyer/{address}")
+# ─── GET /disputes/buyer/{address} (public, free) ────────────────────
+# PR #138 P2 — this IS a real public route, so it stays in the OpenAPI
+# schema, but it is tagged `free` and given `security: []` so an
+# agent scanner does not mistake it for a paid endpoint that failed
+# its payment check.
+@router.get(
+    "/api/v1/disputes/buyer/{address}",
+    tags=["free"],
+    summary="Public dispute counts for a buyer wallet (free, no payment).",
+    openapi_extra={"security": []},
+)
 async def public_buyer_counts(address: str) -> dict:
     try:
         cleaned = _validate_wallet(address)

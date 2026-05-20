@@ -215,6 +215,17 @@ def custom_openapi_factory(app: FastAPI):
             # security: leave as-is (or undefined) — the x-payment-info
             # block is the canonical payment marker.
 
+        # PR #138 P2 — keep internal/bearer-only routes out of the
+        # public OpenAPI. Agent scanners walk /openapi.json and probe
+        # every path as if it were a payable surface; the
+        # /api/v1/internal/* dispute routes are bearer-authed internal
+        # endpoints and produce noisy validation-before-payment results.
+        # Drop them from the published schema entirely (they keep
+        # working — they're just not advertised).
+        for p in list(paths.keys()):
+            if p.startswith("/api/v1/internal/"):
+                del paths[p]
+
         # Free routes get an explicit `security: []` so OpenAPI-first
         # agents distinguish "no auth needed" from "missing metadata".
         for path, ops in paths.items():
@@ -224,6 +235,14 @@ def custom_openapi_factory(app: FastAPI):
                 if (path, method) in PAID_PATH_METHODS:
                     continue
                 op.setdefault("security", [])
+                # PR #138 P2 — the public dispute-count route is a
+                # genuine free API; mark it unambiguously so a scanner
+                # reads it as free, not as an unlabelled paid surface.
+                if path.startswith("/api/v1/disputes/"):
+                    op["x-x402-free"] = True
+                    desc = op.get("description") or ""
+                    if "no payment" not in desc.lower():
+                        op["description"] = ("Free — no payment required. " + desc).strip()
 
         app.openapi_schema = schema
         return schema
@@ -231,65 +250,66 @@ def custom_openapi_factory(app: FastAPI):
     return custom_openapi
 
 
-# ─── Middleware: POST-aware preflight + accepts.resource injection ───
+# ─── Paid-path matching (module-level — shared by preflight + rewriter)
 ALLOWED_ORIGIN_DEFAULT = "*"
 ALLOWED_HEADERS_DEFAULT = "Content-Type, X-Payment, Authorization"
 ALLOWED_METHODS = "GET, POST, OPTIONS"
 PREFLIGHT_MAX_AGE = "86400"
 
 
+def _split_template(path: str) -> tuple[str, ...]:
+    """Static segments around every `{param}` placeholder.
+    /api/v1/services/{id}/wash-detail → ('/api/v1/services/', '/wash-detail')"""
+    out: list[str] = []
+    cur = ""
+    in_param = False
+    for ch in path:
+        if ch == "{":
+            if cur:
+                out.append(cur)
+            cur = ""
+            in_param = True
+        elif ch == "}":
+            in_param = False
+        elif not in_param:
+            cur += ch
+    if cur:
+        out.append(cur)
+    return tuple(out)
+
+
+_PAID_PATH_SEGMENTS = [_split_template(p["path"]) for p in PAID_ENDPOINTS]
+
+
+def is_paid_path(request_path: str) -> bool:
+    """True if `request_path` matches one of the paid endpoint templates."""
+    for segments in _PAID_PATH_SEGMENTS:
+        pos = 0
+        ok = True
+        for i, seg in enumerate(segments):
+            idx = request_path.find(seg, pos)
+            if idx == -1:
+                ok = False
+                break
+            if i == 0 and idx != 0:
+                ok = False
+                break
+            pos = idx + len(seg)
+        # Last segment must end the path (no trailing /something_else).
+        if ok and pos == len(request_path):
+            return True
+    return False
+
+
+# ─── Middleware: POST-aware preflight + accepts.resource injection ───
 class X402PreflightMiddleware(BaseHTTPMiddleware):
     """Handles OPTIONS preflight for paid endpoints with the full method
     list. The existing CORSMiddleware can keep its narrower allow_methods
     for everything else — this middleware sits in front of it and
     short-circuits the OPTIONS for paid routes only."""
 
-    def __init__(self, app, paid_paths: Iterable[str] = (p["path"] for p in PAID_ENDPOINTS)):
-        super().__init__(app)
-        # Convert {id}/{cat}/{address} templates into prefix matches:
-        # /api/v1/services/{id}/wash-detail → ("/api/v1/services/", "/wash-detail")
-        self._tpl_segments = [self._split_template(p) for p in paid_paths]
-
-    @staticmethod
-    def _split_template(path: str) -> tuple[str, ...]:
-        """Returns the static segments around every `{param}` placeholder."""
-        out: list[str] = []
-        cur = ""
-        in_param = False
-        for ch in path:
-            if ch == "{":
-                if cur:
-                    out.append(cur)
-                cur = ""
-                in_param = True
-            elif ch == "}":
-                in_param = False
-            elif not in_param:
-                cur += ch
-        if cur:
-            out.append(cur)
-        return tuple(out)
-
-    def _matches_paid(self, request_path: str) -> bool:
-        for segments in self._tpl_segments:
-            pos = 0
-            ok = True
-            for i, seg in enumerate(segments):
-                idx = request_path.find(seg, pos)
-                if idx == -1:
-                    ok = False
-                    break
-                if i == 0 and idx != 0:
-                    ok = False
-                    break
-                pos = idx + len(seg)
-            # Last segment must end the path (no trailing /something_else).
-            if ok and pos == len(request_path):
-                return True
-        return False
-
     async def dispatch(self, request: Request, call_next):
-        if request.method == "OPTIONS" and self._matches_paid(request.url.path):
+        if request.method == "OPTIONS" and is_paid_path(request.url.path):
             origin = request.headers.get("origin", ALLOWED_ORIGIN_DEFAULT)
             req_headers = request.headers.get(
                 "access-control-request-headers", ALLOWED_HEADERS_DEFAULT
@@ -307,13 +327,18 @@ class X402PreflightMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
-REWRITER_VERSION = "v2.3"
+REWRITER_VERSION = "v2.4"
 
 # CORS headers attached to 402 responses so browser clients can read
 # the body and the payment-required header. The facilitator emits 402s
 # outside the FastAPI user-middleware chain, so the existing
 # CORSMiddleware never gets to inject these — we have to do it here.
 ACAO_EXPOSE_HEADERS = "payment-required, x-x402-rewriter"
+
+# PR #138 P3 — paid 402 challenges and paid 200 responses must not be
+# cached: a 402 is a one-shot challenge, and a paid 200 body is data the
+# buyer just paid for. Emit an explicit no-store on both.
+CACHE_CONTROL_NO_STORE = "no-store"
 
 
 class X402ResourceRewriter:
@@ -380,6 +405,10 @@ class X402ResourceRewriter:
                 request_origin = value
                 break
 
+        # PR #138 P3 — is this a paid endpoint? A paid 200 response
+        # carries data the buyer just paid for and must not be cached.
+        paid = is_paid_path(scope.get("path", "") or "")
+
         # Per-request state. We only intercept (buffer the body) when
         # the response is a 402; everything else streams through.
         state = {
@@ -399,8 +428,14 @@ class X402ResourceRewriter:
                 if not state["intercept"]:
                     # Add tracer header to everything so we can prove
                     # the rewriter is in the chain even on 200s.
-                    headers = list(message.get("headers") or [])
+                    headers = [
+                        (n, v) for (n, v) in (message.get("headers") or [])
+                        if not (paid and n.lower() == b"cache-control")
+                    ]
                     headers.append((b"x-x402-rewriter", REWRITER_VERSION.encode()))
+                    # P3 — no-store on paid endpoint responses (200 etc.).
+                    if paid:
+                        headers.append((b"cache-control", CACHE_CONTROL_NO_STORE.encode()))
                     new_msg = dict(message)
                     new_msg["headers"] = headers
                     await send(new_msg)
@@ -427,7 +462,8 @@ class X402ResourceRewriter:
         """Append the CORS triple browsers need to read a 402 body +
         the payment-required header. Idempotent — drops any existing
         Access-Control-Allow-Origin / Expose-Headers so we don't
-        duplicate when an inner middleware also set them."""
+        duplicate when an inner middleware also set them.
+        Cache-Control is handled separately by _with_no_store()."""
         kept = []
         seen_vary = None
         for name, value in headers:
@@ -456,6 +492,15 @@ class X402ResourceRewriter:
                     vary_parts.append(p)
         vary_parts.append(b"Origin")
         kept.append((b"vary", b", ".join(vary_parts)))
+        return kept
+
+    @staticmethod
+    def _with_no_store(headers: list) -> list:
+        """PR #138 P3 — stamp Cache-Control: no-store. A 402 is a
+        one-shot payment challenge and must never be cached. Drops any
+        pre-existing cache-control so the header is unambiguous."""
+        kept = [(n, v) for (n, v) in headers if n.lower() != b"cache-control"]
+        kept.append((b"cache-control", CACHE_CONTROL_NO_STORE.encode("ascii")))
         return kept
 
     async def _rewrite_and_send(self, state, send):
@@ -492,6 +537,7 @@ class X402ResourceRewriter:
             # Nothing to patch in the body, but we still need CORS on
             # the 402 so browsers can read whatever IS there.
             new_headers = self._inject_cors(headers, origin)
+            new_headers = self._with_no_store(new_headers)
             new_headers.append((b"x-x402-rewriter", f"{REWRITER_VERSION}-noop".encode()))
             await send({**start, "headers": new_headers})
             await send({"type": "http.response.body", "body": body_bytes, "more_body": False})
@@ -527,27 +573,57 @@ class X402ResourceRewriter:
         new_headers.append((b"payment-required", new_header_value))
         new_headers.append((b"content-length", str(len(new_body)).encode("ascii")))
         new_headers = self._inject_cors(new_headers, origin)
+        new_headers = self._with_no_store(new_headers)
         new_headers.append((b"x-x402-rewriter", REWRITER_VERSION.encode()))
 
         await send({**start, "headers": new_headers})
         await send({"type": "http.response.body", "body": new_body, "more_body": False})
 
 
+# ─── /.well-known/x402 discovery pointer (PR #138 P3) ────────────────
+# A tiny machine-readable pointer for crawlers that start discovery at
+# /.well-known/ . Not required (the ecosystem listing already points at
+# /openapi.json) but it removes a 404 and helps well-known-first agents.
+WELL_KNOWN_X402 = {
+    "x402Version": 2,
+    "publisher": "PrintMoneyLab",
+    "openapi": "https://api.x402.printmoneylab.com/openapi.json",
+    "mcp": "https://api.x402.printmoneylab.com/mcp",
+    "documentation": "https://x402.printmoneylab.com/docs/methodology",
+}
+
+
+async def _well_known_x402(request):  # noqa: ARG001 — Starlette route sig
+    from starlette.responses import JSONResponse
+    return JSONResponse(
+        WELL_KNOWN_X402,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 # ─── Wireup ──────────────────────────────────────────────────────────
 def setup_x402_meta(app: FastAPI) -> None:
-    """Mount the OpenAPI factory + preflight middleware on the FastAPI
-    app. Idempotent. Does NOT mount the 402 response rewriter — that
-    needs to wrap `app` from the outside (see `wrap_with_rewriter` or
-    just do `app = X402ResourceRewriter(app)` at the very end of api.py).
+    """Mount the OpenAPI factory + preflight middleware +
+    /.well-known/x402 pointer on the FastAPI app. Idempotent. Does NOT
+    mount the 402 response rewriter — that needs to wrap `app` from the
+    outside (see `wrap_with_rewriter` or just do
+    `app = X402ResourceRewriter(app)` at the very end of api.py).
     """
     if getattr(app.state, "_x402_meta_installed", False):
         log.info("x402_meta already installed, skipping")
         return
     app.add_middleware(X402PreflightMiddleware)
     app.openapi = custom_openapi_factory(app)
+    # /.well-known/x402 — kept out of the OpenAPI schema itself (it is a
+    # discovery aid, not an agent-callable API operation).
+    app.add_route(
+        "/.well-known/x402", _well_known_x402,
+        methods=["GET"], include_in_schema=False,
+    )
     app.state._x402_meta_installed = True
     log.info(
-        "x402_meta installed: %d paid endpoints, %d accepts entries (rewriter mounted separately)",
+        "x402_meta installed: %d paid endpoints, %d accepts entries, "
+        "/.well-known/x402 pointer (rewriter mounted separately)",
         len(PAID_ENDPOINTS),
         len(ACCEPTS_TEMPLATE),
     )

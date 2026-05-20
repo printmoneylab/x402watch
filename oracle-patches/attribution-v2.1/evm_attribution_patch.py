@@ -1,81 +1,70 @@
 #!/usr/bin/env python3
 """
-Phase 2b — evm.py attribution patch (Option A-naive).
+Phase 2b — evm.py attribution patch (Option A: seller+amount keying).
 
 Permanent location: /home/ubuntu/x402watch/scripts/apply_attribution_v21.py
 
+v2 of this patcher — rewritten against the ACTUAL evm.py source Moa
+pasted (the first draft assumed `GROUP BY seller_address` with no
+WHERE/LOWER; the real code has `WHERE chain = $1` and
+`GROUP BY LOWER(seller_address)`).
+
 The bug
 =======
-indexer/evm.py:165 (approx) builds a seller_address → service_id map for
-attributing incoming USDC transfers:
+indexer/evm.py `load_seller_map()` builds a per-chain
+seller_address → service_id map and `parse_log()` looks payments up by
+recipient address alone:
 
-    SELECT LOWER(seller_address) AS addr, MIN(id) AS service_id
-    FROM services GROUP BY seller_address
-    → {addr: service_id for r in rows}
-    → service_id = seller_map.get(to_addr)
+    async def load_seller_map(conn, chain):
+        rows = await conn.fetch('''
+            SELECT LOWER(seller_address) AS addr, MIN(id) AS service_id
+            FROM services WHERE chain = $1 GROUP BY LOWER(seller_address)
+        ''', chain)
+        return {r['addr']: r['service_id'] for r in rows}
 
-For any seller that operates N>1 endpoints, all incoming USDC transfers
-collapse onto MIN(id) (the oldest service the seller ever registered).
-KR Crypto's 11 endpoints → all attribute to service_id=14391 (kr-prices).
-Aubrai's 7 endpoints → all to its MIN(id). Google Maps' 12 → all to one.
-Etc.
+One seller wallet → one service_id (the oldest, via MIN(id)). Every
+multi-endpoint operator collapses. KR Crypto's 11 endpoints all →
+service_id 14391.
 
 The fix
 =======
-Include `price_amount` in the GROUP BY key and the lookup key. Then
-attribute by the (seller_address, amount) pair instead of seller_address
-alone. KR Crypto:
+Key the map by (lower(seller_address), amount_micro) where
+amount_micro = ROUND(price_amount * 1e6) — the integer micro-USDC
+value, which equals the raw `value` field of a USDC Transfer log
+(USDC = 6 decimals on Base and Solana). A service with NULL
+price_amount is keyed (addr, None) and acts as the fallback when an
+exact (addr, amount) match is absent.
 
-   seller=0xcF92  →  4 distinct prices ($0.001, $0.01, $0.05, $0.10)
-                  →  4 attribution buckets instead of 1.
+This is the *partial* fix. Same-price collisions inside one seller
+(KR Crypto has 4 endpoints at $0.001) still resolve to MIN(id) within
+the bucket. The merchant feed (Phase 2c) removes that residual loss.
 
-This is *lossy* within a bucket — KR Crypto has 4 endpoints at $0.001 so
-$0.001 payments still collapse to MIN(id) within the $0.001 bucket. That
-loss is addressed by the Option D merchant feed (Phase 2c), which gives
-us 100% accuracy for opt-in merchants.
+THREE patches, all required
+===========================
+  P1  load_seller_map()  — full-function replacement (exact source).
+  P2  parse_log() signature — `seller_map` type annotation.
+  P3  parse_log() body lookup — `seller_map.get(<addr>)` →
+      `seller_map.get((<addr>, amount)) or seller_map.get((<addr>, None))`.
 
-What this patcher does
-======================
-- Loads /home/ubuntu/x402watch/indexer/evm.py.
-- Locates the seller_map build block via two anchor patterns. Bails if
-  neither matches (don't write garbage when the file has been hand-edited
-  beyond what we anticipated).
-- Replaces the GROUP BY + lookup with (seller, amount) composite key.
-- Adds an `attribution_source` column write so future audits can tell
-  which rows came from which attribution mechanism.
-- Idempotent — replacement-presence is checked BEFORE anchor-match
-  (same convention as oracle-patches/x402watch-alerts/apply_wireup.py).
+P1 + P2 anchors are EXACT (built from Moa's paste). P3 is a best
+guess: it assumes the lookup is literally `seller_map.get(to_addr)`
+and that a raw-integer micro-USDC `amount` variable is in scope at
+that point. If the real parse_log uses a different variable name or
+a dollar-float amount, P3's anchor will not match and the patcher
+BAILS WITHOUT WRITING ANYTHING, then prints every `seller_map` /
+amount-looking line so the anchor can be finalised.
+
+The patcher is all-or-nothing: it never applies P1+P2 without P3,
+because a tuple-keyed map with a scalar lookup would null every
+attribution.
 
 Apply with:
     cd /home/ubuntu/x402watch
     venv/bin/python scripts/apply_attribution_v21.py             # dry-run
     venv/bin/python scripts/apply_attribution_v21.py --apply     # write
 
-Idempotent + verifies file syntax + checks the indexer module still
-imports cleanly. Backup at evm.py.bak.attribution-v21-YYYYMMDD-HHMM.
-
-What this patcher does NOT do
-=============================
-- Backfill historical rows. Existing transactions stay with their wrong
-  service_id until backfill_kr_crypto.sql runs (Phase 2d).
-- Touch indexer/solana.py. That's a separate work item.
-- Touch derive_global.py. That re-aggregates from transactions, which
-  needs to happen after backfill, not after the indexer change.
-
-Sequence after this patch
-=========================
-1. Restart indexer service (`sudo systemctl restart x402watch-indexer`).
-2. Wait one indexer cycle. New transactions should land with corrected
-   service_id (modulo same-price collisions).
-3. Verify:
-     SELECT service_id, COUNT(*)
-     FROM transactions
-     WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb'
-       AND time > NOW() - INTERVAL '1 hour'
-     GROUP BY 1;
-   Expected: rows in 14391/14744/14741/14628 etc. (depending on which
-   prices KR Crypto received in the last hour) — NOT all on 14391.
-4. Run backfill_kr_crypto.sql (Phase 2d) to rewrite historical rows.
+Idempotent (replacement-presence checked before anchor-match).
+Backup at evm.py.bak.attribution-v21-YYYYMMDD-HHMM.
 """
 from __future__ import annotations
 
@@ -93,77 +82,99 @@ KST = timezone(timedelta(hours=9))
 BAK_TAG = "attribution-v21-" + datetime.now(KST).strftime("%Y%m%d-%H%M")
 
 
-# ─── Patch definitions ──────────────────────────────────────────────
-# Anchor 1: the seller_map SELECT. The reported pattern from Moa was:
-#   SELECT LOWER(seller_address) AS addr, MIN(id) AS service_id
-#   FROM services GROUP BY seller_address
-# We allow flexibility in whitespace/quoting by matching on the core SQL
-# tokens via a regex pre-check before doing the exact-string replace.
+# ─── P1: load_seller_map full-function replacement ──────────────────
+# Anchor is the EXACT source Moa pasted (evm.py:162-172).
+P1_ANCHOR = '''async def load_seller_map(conn, chain: str) -> dict[str, int]:
+    rows = await conn.fetch(
+        """
+        SELECT LOWER(seller_address) AS addr, MIN(id) AS service_id
+        FROM services
+        WHERE chain = $1
+        GROUP BY LOWER(seller_address)
+        """,
+        chain,
+    )
+    return {r["addr"]: r["service_id"] for r in rows}'''
 
-# We anchor on the exact SQL text first. The patcher refuses to apply if
-# the anchor isn't present, since this is a hot-path file in production.
+P1_REPLACEMENT = '''async def load_seller_map(conn, chain: str) -> dict[tuple[str, int | None], int]:
+    # v2.1 attribution — keyed by (lower(seller_address), amount_micro).
+    # amount_micro = ROUND(price_amount * 1e6) matches the raw integer
+    # `value` of a USDC Transfer log (USDC = 6 decimals on Base + Solana).
+    # A service with NULL price_amount is keyed (addr, None) and serves
+    # as the fallback when an exact (addr, amount) match is absent.
+    # Same-price collisions within one seller still collapse to MIN(id);
+    # the merchant feed (Phase 2c) removes that residual loss.
+    rows = await conn.fetch(
+        """
+        SELECT LOWER(seller_address) AS addr,
+               CASE WHEN price_amount IS NULL THEN NULL
+                    ELSE ROUND(price_amount * 1000000)::bigint
+               END AS amount_micro,
+               MIN(id) AS service_id
+        FROM services
+        WHERE chain = $1
+        GROUP BY LOWER(seller_address), amount_micro
+        """,
+        chain,
+    )
+    return {(r["addr"], r["amount_micro"]): r["service_id"] for r in rows}'''
 
-ANCHOR_SQL = (
-    "SELECT LOWER(seller_address) AS addr, MIN(id) AS service_id\n"
-    "        FROM services GROUP BY seller_address"
-)
-REPLACEMENT_SQL = (
-    "SELECT LOWER(seller_address) AS addr,\n"
-    "               price_amount,\n"
-    "               MIN(id) AS service_id\n"
-    "        FROM services\n"
-    "        WHERE price_amount IS NOT NULL\n"
-    "        GROUP BY seller_address, price_amount"
-)
 
-# Anchor 2: the lookup dict build. Originally:
-#   seller_map = {r['addr']: r['service_id'] for r in rows}
-#   ...
-#   service_id = seller_map.get(to_addr)
-# Replaced with a 2-key lookup keyed on (addr, amount). We pick a tight
-# pattern that the indexer almost certainly has, but allow the patcher
-# to FAIL gracefully if the variable names differ.
+# ─── P2: parse_log signature type annotation ────────────────────────
+P2_ANCHOR = "    seller_map: dict[str, int],\n"
+P2_REPLACEMENT = "    seller_map: dict[tuple[str, int | None], int],\n"
 
-ANCHOR_LOOKUP_BUILD = "seller_map = {r['addr']: r['service_id'] for r in rows}"
-REPLACEMENT_LOOKUP_BUILD = (
-    "# v2.1 attribution: keyed by (seller, amount).\n"
-    "    # Same-price collisions still collapse to MIN(id) within the bucket;\n"
-    "    # those are addressed by the merchant feed (Phase 2c).\n"
-    "    seller_map = {(r['addr'], float(r['price_amount'])): r['service_id'] for r in rows}"
-)
 
-ANCHOR_LOOKUP_USE = "service_id = seller_map.get(to_addr)"
-REPLACEMENT_LOOKUP_USE = (
-    "# v2.1 attribution: try (seller, amount); fall back to first match for backwards-compat logging.\n"
-    "    service_id = seller_map.get((to_addr, float(amount)))\n"
-    "    attribution_source = 'price_match' if service_id is not None else 'unattributed'"
+# ─── P3: parse_log body lookup (BEST GUESS) ─────────────────────────
+# Assumption: the lookup is literally `seller_map.get(to_addr)` and a
+# raw-integer micro-USDC `amount` variable is in scope. If wrong, the
+# patcher bails (see scan_seller_map_usage()).
+P3_ANCHOR = "seller_map.get(to_addr)"
+P3_REPLACEMENT = (
+    "seller_map.get((to_addr, amount)) or seller_map.get((to_addr, None))"
 )
 
 
 PATCHES = [
-    (ANCHOR_SQL, REPLACEMENT_SQL),
-    (ANCHOR_LOOKUP_BUILD, REPLACEMENT_LOOKUP_BUILD),
-    (ANCHOR_LOOKUP_USE, REPLACEMENT_LOOKUP_USE),
+    ("P1 load_seller_map", P1_ANCHOR, P1_REPLACEMENT),
+    ("P2 parse_log signature", P2_ANCHOR, P2_REPLACEMENT),
+    ("P3 parse_log lookup", P3_ANCHOR, P3_REPLACEMENT),
 ]
 
 
-def apply(path: Path, patches, dry_run: bool):
+def scan_seller_map_usage(src: str) -> list[str]:
+    """Return every line that mentions seller_map or looks like it
+    extracts a transfer amount — diagnostic output when P3 misses."""
+    out = []
+    for i, line in enumerate(src.splitlines(), 1):
+        low = line.lower()
+        if "seller_map" in low:
+            out.append(f"  L{i}: {line.rstrip()}")
+        elif re.search(r"\bamount\b|\bvalue\b|int\(lg\[|topics\[", low):
+            out.append(f"  L{i}: {line.rstrip()}")
+    return out
+
+
+def apply(path: Path, dry_run: bool):
     if not path.exists():
-        return False, [f"  ✗ missing: {path}"]
+        return False, [f"  ✗ missing: {path}"], None
     src = path.read_text()
     new = src
     notes = []
-    for anchor, replacement in patches:
-        if replacement and replacement in new:
-            notes.append(f"  ◌ already applied ({anchor.strip()[:60]}…)")
+    all_ok = True
+    for name, anchor, replacement in PATCHES:
+        if replacement in new:
+            notes.append(f"  ◌ {name}: already applied")
         elif anchor in new:
             new = new.replace(anchor, replacement, 1)
-            notes.append(f"  ✓ matched ({anchor.strip()[:60]}…)")
+            notes.append(f"  ✓ {name}: matched")
         else:
-            notes.append(f"  ✗ ANCHOR MISSING: {anchor.strip()[:80]}…")
-            return False, notes
+            notes.append(f"  ✗ {name}: ANCHOR MISSING")
+            all_ok = False
+    if not all_ok:
+        return False, notes, src
     if new == src:
-        return True, notes + ["  (no changes — all patches already applied)"]
+        return True, notes + ["  (no changes — all patches already applied)"], src
     if not dry_run:
         bak = path.with_suffix(path.suffix + f".bak.{BAK_TAG}")
         shutil.copy2(path, bak)
@@ -171,7 +182,7 @@ def apply(path: Path, patches, dry_run: bool):
         notes.append(f"  wrote {path.name}, backup → {bak.name}")
     else:
         notes.append("  [dry-run] would write")
-    return True, notes
+    return True, notes, new
 
 
 def main() -> int:
@@ -184,17 +195,21 @@ def main() -> int:
     print(f"== attribution v2.1 evm.py patch — {'APPLY' if not dry_run else 'DRY RUN'} ==")
     print(f"   target: {EVM}")
     print()
-    ok, notes = apply(EVM, PATCHES, dry_run)
+    ok, notes, src = apply(EVM, dry_run)
     print("\n".join(notes))
 
     if not ok:
         print()
-        print("FAIL — anchor not found. Nothing written.")
+        print("FAIL — at least one anchor missing. Nothing written.")
         print()
-        print("If the actual SQL / lookup code drifted from what this patcher")
-        print("expects, paste the current evm.py:140-180 contents and we'll")
-        print("regenerate the anchors. The patcher refuses to apply blindly to")
-        print("production indexer code.")
+        if src is not None:
+            print("seller_map / amount usage in evm.py (paste this back to finalise P3):")
+            for line in scan_seller_map_usage(src):
+                print(line)
+        print()
+        print("If P3 missed: the real parse_log lookup is NOT")
+        print("`seller_map.get(to_addr)`. Send the parse_log body so the")
+        print("P3 anchor + the amount-variable name can be set exactly.")
         return 1
 
     if not dry_run:
@@ -206,23 +221,14 @@ def main() -> int:
             return 1
 
     print()
-    print("Next steps (Moa):")
+    print("Next (Moa):")
     print("  1. sudo systemctl restart x402watch-indexer")
-    print("  2. Wait one indexer cycle (~5-10 min depending on cron)")
-    print("  3. Verify new attribution:")
-    print()
-    print("     sudo docker exec x402watch-postgres psql -U x402watch -d x402watch -c \\")
-    print("       \"SELECT service_id, COUNT(*) AS n, SUM(amount) AS usdc \\")
-    print("        FROM transactions \\")
-    print("        WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb' \\")
-    print("          AND time > NOW() - INTERVAL '1 hour' \\")
-    print("        GROUP BY 1 ORDER BY n DESC;\"")
-    print()
-    print("     Expected: rows spread across 14391/14744/14741/etc. (per price),")
-    print("               NOT all on 14391.")
-    print()
-    print("  4. When new attribution looks correct, proceed to Phase 2d backfill")
-    print("     (oracle-patches/attribution-v2.1/backfill_kr_crypto.sql).")
+    print("  2. wait one indexer cycle")
+    print("  3. verify new attribution spreads across price tiers:")
+    print("     SELECT service_id, COUNT(*) FROM transactions")
+    print("     WHERE seller_address='0xcf9223ece895258dea8d288aebcf846ab8e342fb'")
+    print("       AND time > NOW() - INTERVAL '1 hour' GROUP BY 1;")
+    print("  4. then Phase 2d backfill (backfill_kr_crypto.sql)")
     return 0
 
 

@@ -56,6 +56,7 @@ import os
 import sys
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
+from urllib.parse import quote as urllib_quote
 
 import httpx
 from cryptography.exceptions import InvalidSignature
@@ -269,46 +270,95 @@ async def ingest_feed(conn, body: dict, dry_run: bool = False) -> dict:
 
 
 # ─── Polling loop ───────────────────────────────────────────────────
-async def fetch_feed(url: str) -> Optional[dict]:
+def _feed_url(url: str, since: Optional[str], limit: Optional[int],
+              cursor: Optional[str]) -> str:
+    """Append since / limit / cursor query params to a feed URL."""
+    params = []
+    if since:
+        params.append("since=" + urllib_quote(since))
+    if limit:
+        params.append(f"limit={int(limit)}")
+    if cursor:
+        params.append("cursor=" + urllib_quote(cursor))
+    return url + ("?" + "&".join(params) if params else "")
+
+
+async def fetch_feed(url: str, *, since: Optional[str] = None,
+                     limit: Optional[int] = None,
+                     cursor: Optional[str] = None) -> Optional[dict]:
+    full = _feed_url(url, since, limit, cursor)
     async with httpx.AsyncClient(timeout=NETWORK_TIMEOUT) as c:
-        r = await c.get(url)
+        r = await c.get(full)
         if r.status_code != 200:
-            log.warning("feed %s returned %s", url, r.status_code)
+            log.warning("feed %s returned %s", full, r.status_code)
             return None
         if len(r.content) > MAX_BODY_BYTES:
-            log.error("feed %s exceeded body cap (%d bytes)", url, len(r.content))
+            log.error("feed %s exceeded body cap (%d bytes)", full, len(r.content))
             return None
         try:
             return r.json()
         except Exception:
-            log.exception("feed %s json parse failed", url)
+            log.exception("feed %s json parse failed", full)
             return None
 
 
-async def poll_merchant(merchant_id: str, feed_base_url: str, *, dry_run: bool = False) -> dict:
-    """Try .well-known/ first, fall back to /api/v1/."""
+async def poll_merchant(merchant_id: str, feed_base_url: str, *,
+                        dry_run: bool = False,
+                        since: Optional[str] = None,
+                        limit: Optional[int] = None) -> dict:
+    """Fetch + verify + ingest a merchant feed.
+
+    Normal hourly poll: `since=None` — the merchant serves its default
+    24h window, one page.
+
+    Backfill: pass `since` (e.g. the merchant's launch date). This walks
+    every page via the feed's `next_cursor` so the entire history is
+    ingested. Each page is an independently signed feed body with its
+    own monotonically-increasing feed_seq, so replay protection +
+    signature verification run per page. ingest_feed is idempotent
+    (SELECT-then-UPDATE/INSERT), so a backfill that overlaps the hourly
+    poll's window is harmless.
+    """
     pool = await get_pool()
-    candidates = [
+    bases = [
         f"{feed_base_url.rstrip('/')}/.well-known/x402watch-feed.json",
         f"{feed_base_url.rstrip('/')}/api/v1/x402watch-feed.json",
     ]
-    body = None
-    fetched_from = None
-    for url in candidates:
-        body = await fetch_feed(url)
-        if body is not None:
-            fetched_from = url
+    # Pick whichever base URL responds.
+    base_ok = None
+    first_body = None
+    for b in bases:
+        first_body = await fetch_feed(b, since=since, limit=limit)
+        if first_body is not None:
+            base_ok = b
             break
-    if body is None:
+    if first_body is None:
         return {"merchant_id": merchant_id, "error": "fetch_failed", "fetched_from": None}
 
+    totals = {"accepted": 0, "rejected_seller": 0, "rejected_resource": 0,
+              "rejected_amount": 0, "unchanged": 0}
+    pages = 0
+    body = first_body
+    last_feed_seq = None
     async with pool.acquire() as conn:
-        ok, reason = await verify_feed(conn, body)
-        if not ok:
-            return {"merchant_id": merchant_id, "error": reason, "fetched_from": fetched_from}
-        counts = await ingest_feed(conn, body, dry_run=dry_run)
-    return {"merchant_id": merchant_id, "fetched_from": fetched_from,
-            "feed_seq": body.get("feed_seq"), "counts": counts}
+        while body is not None:
+            ok, reason = await verify_feed(conn, body)
+            if not ok:
+                return {"merchant_id": merchant_id, "error": reason,
+                        "fetched_from": base_ok, "pages": pages, "counts": totals}
+            counts = await ingest_feed(conn, body, dry_run=dry_run)
+            for k in totals:
+                totals[k] += counts.get(k, 0)
+            pages += 1
+            last_feed_seq = body.get("feed_seq")
+            cursor = body.get("next_cursor")
+            if not cursor:
+                break
+            # Fetch the next page outside acquire()? Keep it simple —
+            # httpx call inside the conn context is fine, the conn is idle.
+            body = await fetch_feed(base_ok, since=since, limit=limit, cursor=cursor)
+    return {"merchant_id": merchant_id, "fetched_from": base_ok,
+            "pages": pages, "feed_seq": last_feed_seq, "counts": totals}
 
 
 async def poll_all(*, dry_run: bool = False) -> list[dict]:
@@ -327,7 +377,10 @@ async def poll_all(*, dry_run: bool = False) -> list[dict]:
 
 async def _main(args):
     if args.merchant and args.feed_url:
-        result = await poll_merchant(args.merchant, args.feed_url, dry_run=args.dry_run)
+        result = await poll_merchant(
+            args.merchant, args.feed_url,
+            dry_run=args.dry_run, since=args.since, limit=args.limit,
+        )
         print(json.dumps(result, indent=2, default=str))
     else:
         results = await poll_all(dry_run=args.dry_run)
@@ -335,8 +388,16 @@ async def _main(args):
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--merchant", help="merchant_id to poll (omit = all)")
+    p = argparse.ArgumentParser(
+        description="x402watch merchant feed poller / backfill tool")
+    p.add_argument("--merchant", help="merchant_id to poll (omit = all registered)")
     p.add_argument("--feed-url", help="base URL of the merchant (required with --merchant)")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true",
+                   help="verify + count, write nothing")
+    p.add_argument("--since",
+                   help="ISO date/time lower bound — set this to backfill "
+                        "the full history (walks every page via next_cursor). "
+                        "Omit for a normal 24h hourly poll.")
+    p.add_argument("--limit", type=int,
+                   help="page size (max 5000; merchant caps it). Use 5000 for backfill.")
     asyncio.run(_main(p.parse_args()))

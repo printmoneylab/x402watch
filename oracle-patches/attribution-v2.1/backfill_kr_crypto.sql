@@ -1,28 +1,38 @@
--- Phase 2d — KR Crypto backfill SQL
+-- Phase 2d — KR Crypto attribution backfill
 --
 -- Permanent location on Oracle:
 --   /home/ubuntu/x402watch/migrations/v21_attribution_backfill.sql
 --
--- Apply order:
---   1. Schema additions (transactions.attribution_source + supporting tables)
---   2. Backup table (full, untouched copy of transactions)
---   3. KR Crypto seller — staging table built from merchant feed ingestion
---      OR from KR Crypto's stats.jsonl directly (uploaded as a temp CSV)
---   4. UPDATE transactions for tx_hashes that exist on both sides
---   5. Verification queries
---   6. (optional) Re-aggregate services + run derive_global
+-- REVISED for Phase 2c findings. The original draft loaded stats.jsonl
+-- into a staging table via jq and did the attribution join in SQL.
+-- That is replaced: the historical re-attribution is now done by
+-- running `indexer/merchant_feed.py` in BACKFILL MODE (--since), which
+-- reuses the exact, already-live-verified code path
+--   KR Crypto x402watch_feed.py  →  x402watch merchant_feed.py
+-- — so stats.jsonl parsing, timestamp/`type`-field handling, resource
+-- URL normalisation, Ed25519 verification, and the
+-- SELECT-then-UPDATE/INSERT attribution are all the SAME code that
+-- Phase 2c proved correct (dry-run accepted 51, rejected 0).
 --
--- NEVER hard-deletes a row. Worst-case rollback: TRUNCATE transactions then
--- INSERT * FROM transactions_pre_v21_backup. The schema additions are
--- additive — no destructive ALTER.
+-- This SQL file therefore only does the parts merchant_feed.py does
+-- NOT: the safety backup, the pre/post provenance marking, and the
+-- verification queries. The actual data move happens in step B below.
 --
--- Apply with:
---   sudo docker exec -i x402watch-postgres psql -U x402watch -d x402watch \
---     -f /home/ubuntu/x402watch/migrations/v21_attribution_backfill.sql
+-- ─────────────────────────────────────────────────────────────────
+-- RUN ORDER
+--   A. This file, sections 1-3  (schema + backup + pre-mark)
+--   B. merchant_feed.py backfill (shell — see section 4 comment)
+--   C. This file, sections 5-7  (post-mark + verify)
+--   D. derive_global             (shell — see section 7 comment)
+-- ─────────────────────────────────────────────────────────────────
 
+
+-- ===================================================================
+-- A.  Sections 1-3 — run before the merchant_feed.py backfill
+-- ===================================================================
 BEGIN;
 
--- ─── 1. Schema additions (idempotent) ────────────────────────────────
+-- ─── 1. Schema additions (idempotent) ───────────────────────────────
 ALTER TABLE transactions
     ADD COLUMN IF NOT EXISTS attribution_source TEXT,
     ADD COLUMN IF NOT EXISTS feed_merchant_id   TEXT,
@@ -32,24 +42,22 @@ CREATE INDEX IF NOT EXISTS transactions_attribution_idx
     ON transactions (attribution_source, time DESC);
 
 -- Non-unique lookup index on (tx_hash, chain). transactions is a
--- TimescaleDB hypertable partitioned on `time`, so a UNIQUE index that
--- omits the partition column is rejected — we cannot use
--- `ON CONFLICT (tx_hash, chain)`. The merchant feed indexer and the
--- backfill below therefore do explicit SELECT-then-UPDATE/INSERT, and
--- this index keeps that lookup fast.
+-- TimescaleDB hypertable partitioned on `time`; a UNIQUE index that
+-- omits the partition column is rejected — so the merchant feed
+-- indexer + this backfill dedupe with explicit SELECT-then-UPDATE/
+-- INSERT, and this index keeps that lookup fast.
 CREATE INDEX IF NOT EXISTS transactions_txhash_chain_idx
     ON transactions (tx_hash, chain);
 
--- Merchant feed registry — see merchant_feed_spec.md §3
 CREATE TABLE IF NOT EXISTS merchant_feed_keys (
-    merchant_id      TEXT NOT NULL,
-    key_id           TEXT NOT NULL,
+    merchant_id       TEXT NOT NULL,
+    key_id            TEXT NOT NULL,
     public_key_b64url TEXT NOT NULL,
-    feed_base_url    TEXT,
-    valid_from       TIMESTAMPTZ NOT NULL,
-    valid_until      TIMESTAMPTZ NOT NULL,
-    registered_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    revoked_at       TIMESTAMPTZ,
+    feed_base_url     TEXT,
+    valid_from        TIMESTAMPTZ NOT NULL,
+    valid_until       TIMESTAMPTZ NOT NULL,
+    registered_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at        TIMESTAMPTZ,
     PRIMARY KEY (merchant_id, key_id)
 );
 
@@ -59,193 +67,150 @@ CREATE TABLE IF NOT EXISTS merchant_feed_state (
     last_fetch_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ─── 2. Backup table — full snapshot, NEVER modified by anything below
--- `CREATE TABLE IF NOT EXISTS … AS SELECT` is atomic and idempotent:
--- the first run creates the table and copies every row; a second run
--- sees the table already exists and skips the SELECT entirely, so the
--- backup is never doubled. (The old INSERT … ON CONFLICT DO NOTHING
--- was wrong — the backup table has no constraint, so a re-run would
--- have appended a second full copy.)
+-- ─── 2. Backup table — full snapshot, NEVER modified ────────────────
+-- `CREATE TABLE IF NOT EXISTS … AS SELECT` is atomic + idempotent: a
+-- re-run sees the table exists and skips the SELECT, so the backup is
+-- never doubled. Preserved indefinitely until manually dropped.
 CREATE TABLE IF NOT EXISTS transactions_pre_v21_backup AS
 SELECT * FROM transactions;
 
--- ─── 3. Mark all pre-existing rows as legacy_collapse ────────────────
+-- ─── 3. Pre-mark every existing row as legacy_collapse ──────────────
+-- Establishes a known starting provenance. The merchant_feed.py
+-- backfill (step B) then OVERWRITES attribution_source to
+-- 'merchant_feed:kr-crypto' for every real x402 settlement it
+-- recognises. Whatever stays 'legacy_collapse' afterwards on the KR
+-- Crypto seller wallet is, by elimination, a non-x402 USDC transfer
+-- (CEX deposit, manual send, …) and is handled in section 5.
 UPDATE transactions
     SET attribution_source = 'legacy_collapse'
 WHERE attribution_source IS NULL;
 
--- ─── 4. KR Crypto staging table (loaded from stats.jsonl externally) ─
--- Operator loads stats.jsonl into this table via a one-off COPY, e.g.:
---
---   psql -c "TRUNCATE kr_crypto_settlements_staging;"
---   cat /home/ubuntu/KRCryptoAPI/stats.jsonl \
---     | jq -c 'select((.kind // .event) == "payment_settled")
---               | {tx_hash: (.transaction // .tx_hash),
---                  chain: (.network // .chain),
---                  resource_url: (
---                    if (.endpoint // "")|startswith("http") then (.endpoint)
---                    elif (.endpoint // "")|startswith("/") then "https://api.printmoneylab.com" + (.endpoint)
---                    else "https://api.printmoneylab.com/api/v1/" + (.endpoint)
---                    end
---                  ),
---                  payer: (.payer // .buyer),
---                  price_usd: .price_usd,
---                  settled_at: (.ts // .settled_at)}' \
---     | psql -U x402watch -d x402watch -c "COPY kr_crypto_settlements_staging FROM STDIN WITH (FORMAT csv, ...);"
---
--- For simplicity, we use a JSON-shaped temp table.
+COMMIT;
 
-CREATE TABLE IF NOT EXISTS kr_crypto_settlements_staging (
-    tx_hash      TEXT NOT NULL,
-    chain        TEXT NOT NULL,
-    resource_url TEXT NOT NULL,
-    payer        TEXT,
-    price_usd    NUMERIC(12,6),
-    settled_at   TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (tx_hash, chain)
-);
-
--- Verify staging has data before proceeding.
-DO $$
-DECLARE
-    n_staging INT;
-BEGIN
-    SELECT COUNT(*) INTO n_staging FROM kr_crypto_settlements_staging;
-    IF n_staging = 0 THEN
-        RAISE EXCEPTION 'kr_crypto_settlements_staging is empty — load stats.jsonl first (see comments above)';
-    END IF;
-    RAISE NOTICE 'kr_crypto_settlements_staging row count: %', n_staging;
-END $$;
-
--- ─── 5. Resolve each settlement to a services.id ─────────────────────
--- A settlement is bound to the services row with the matching resource_url.
--- We require seller_address match against KR Crypto's wallet too, as
--- a defence-in-depth check.
-
-CREATE TEMP TABLE kr_crypto_resolved AS
-SELECT
-    st.tx_hash,
-    LOWER(REPLACE(st.chain, 'eip155:8453', 'base')) AS chain_norm,
-    s.id   AS service_id,
-    s.seller_address,
-    st.payer,
-    st.price_usd,
-    st.settled_at
-FROM kr_crypto_settlements_staging st
-JOIN services s
-  ON s.resource_url = st.resource_url
- AND (
-   (st.chain LIKE 'eip155:%' AND LOWER(s.seller_address) = LOWER('0xcF9223eCe895258dEa8D288AEBcf846Ab8E342fB'))
-   OR
-   (st.chain LIKE 'solana:%' AND s.seller_address = '3Ywxk31SvWKwZBdY6bLvjmn5h4mzWcT3HJ5UZbYXoVy9')
- );
-
-SELECT
-    COUNT(*) AS staged_settlements,
-    COUNT(DISTINCT service_id) AS distinct_services,
-    MIN(settled_at) AS earliest,
-    MAX(settled_at) AS latest
-FROM kr_crypto_resolved;
-
--- ─── 6. UPDATE transactions for tx_hashes that exist on both sides ───
--- Strict join on (tx_hash, chain). Updates service_id + attribution_source
--- in place. is_x402_payment flipped to TRUE.
-WITH updated AS (
-    UPDATE transactions t
-       SET service_id        = r.service_id,
-           attribution_source = 'merchant_feed:kr-crypto',
-           feed_merchant_id   = 'kr-crypto',
-           is_x402_payment    = TRUE
-      FROM kr_crypto_resolved r
-     WHERE t.tx_hash = r.tx_hash
-       AND (t.chain = r.chain_norm OR (r.chain_norm = 'base' AND t.chain = 'base'))
-    RETURNING t.tx_hash
-)
-SELECT COUNT(*) AS updated_rows FROM updated;
-
--- ─── 7. INSERT any settlements that x402watch never observed ─────────
--- These are settlements KR Crypto saw but the indexer missed entirely
--- (e.g. Solana, where indexer/solana.py is broken). Insert with the
--- correct attribution from the start.
---
--- No ON CONFLICT clause: transactions is a TimescaleDB hypertable and
--- a UNIQUE index on (tx_hash, chain) — which omits the `time` partition
--- column — is not creatable. The NOT EXISTS guard below is the dedupe.
-INSERT INTO transactions (
-    tx_hash, chain, time, buyer_address, seller_address, service_id,
-    amount, attribution_source, feed_merchant_id, is_x402_payment
-)
-SELECT
-    r.tx_hash,
-    r.chain_norm,
-    r.settled_at,
-    r.payer,
-    r.seller_address,
-    r.service_id,
-    r.price_usd,
-    'merchant_feed:kr-crypto',
-    'kr-crypto',
-    TRUE
-FROM kr_crypto_resolved r
-WHERE NOT EXISTS (
-    SELECT 1 FROM transactions t2
-     WHERE t2.tx_hash = r.tx_hash AND t2.chain = r.chain_norm
-  );
-
--- ─── 8. Mark remaining seller-0xcF92 rows as 'legacy_unmatched' ──────
--- Rows that look like they came from KR Crypto's seller but weren't in
--- the merchant feed are likely non-x402 USDC transfers (CEX deposits,
--- ad-hoc sends). Mark them so they're excluded from x402 traffic stats
--- without being deleted.
-UPDATE transactions
-   SET attribution_source = 'legacy_unmatched',
-       is_x402_payment = FALSE
- WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb'
-   AND attribution_source = 'legacy_collapse';
-
--- ─── 9. Verification queries (read-only) ─────────────────────────────
-SELECT 'attribution_source distribution after backfill' AS section;
-SELECT attribution_source, COUNT(*) AS n
+-- Sanity snapshot before the data move:
+SELECT 'BEFORE backfill — KR Crypto seller distribution' AS section;
+SELECT service_id, COUNT(*) AS n, SUM(amount) AS usdc
   FROM transactions
  WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb'
- GROUP BY 1
+ GROUP BY service_id
  ORDER BY n DESC;
+-- Expected: a single fat row on service_id 14391 (~2,451 tx) — the
+-- collapse bug. After backfill this spreads across all KR endpoints.
 
-SELECT 'service_id distribution for KR Crypto after backfill' AS section;
+
+-- ===================================================================
+-- B.  merchant_feed.py BACKFILL — run in a shell, NOT in psql
+-- ===================================================================
+-- KR Crypto launched 2026-04-27. Walk the entire feed history with a
+-- big page size; merchant_feed.py follows next_cursor to the end.
+--
+--   cd /home/ubuntu/x402watch
+--   # dry-run first — verify counts, write nothing
+--   venv/bin/python -m indexer.merchant_feed \
+--     --merchant kr-crypto \
+--     --feed-url https://api.printmoneylab.com \
+--     --since 2026-04-27T00:00:00Z --limit 5000 --dry-run
+--
+--   # then for real
+--   venv/bin/python -m indexer.merchant_feed \
+--     --merchant kr-crypto \
+--     --feed-url https://api.printmoneylab.com \
+--     --since 2026-04-27T00:00:00Z --limit 5000
+--
+-- Expected output: {"pages": N, "counts": {"accepted": ~1342,
+--   "rejected_resource": <kr-news count until step 6b of PHASE_2C
+--   is done>, ...}}. Every accepted row is UPDATEd in place (matched
+--   tx_hash) or INSERTed (KR Crypto Solana settlements x402watch
+--   never indexed), with attribution_source='merchant_feed:kr-crypto'.
+
+
+-- ===================================================================
+-- C.  Sections 5-6 — run AFTER the merchant_feed.py backfill
+-- ===================================================================
+BEGIN;
+
+-- ─── 5. Mark the non-x402 remainder as legacy_unmatched ─────────────
+-- Any KR Crypto seller row still tagged 'legacy_collapse' was not in
+-- the merchant feed → not an x402 payment. Mark it so it is excluded
+-- from x402 traffic stats without being deleted.
+UPDATE transactions
+    SET attribution_source = 'legacy_unmatched',
+        is_x402_payment    = FALSE
+WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb'
+  AND attribution_source = 'legacy_collapse';
+
+-- ─── 6. Verification (read-only) ────────────────────────────────────
+SELECT 'AFTER backfill — attribution_source distribution (KR Crypto)' AS section;
+SELECT attribution_source, COUNT(*) AS n, SUM(amount) AS usdc
+  FROM transactions
+ WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb'
+ GROUP BY attribution_source
+ ORDER BY n DESC;
+-- Expected:
+--   merchant_feed:kr-crypto   ≈ 1342  (the real x402 settlements)
+--   legacy_unmatched          ≈ 1109  (non-x402 USDC transfers)
+
+SELECT 'AFTER backfill — service_id distribution (x402 payments only)' AS section;
 SELECT service_id, COUNT(*) AS n, SUM(amount) AS usdc
   FROM transactions
  WHERE seller_address = '0xcf9223ece895258dea8d288aebcf846ab8e342fb'
    AND is_x402_payment = TRUE
- GROUP BY 1
+ GROUP BY service_id
  ORDER BY n DESC;
+-- Expected: spread across all KR Crypto endpoints — kr-prices the
+-- majority, kr-sentiment / arbitrage-scanner / kimchi-premium etc.
+-- now non-zero. service_id 14391 should be much smaller than the
+-- pre-backfill ~2,451.
 
--- Expected: rows on 14391 (kr-prices, the majority) + meaningful
--- counts on 14744 (arbitrage-scanner), 14741 (kr-sentiment), and
--- the other 8 KR Crypto endpoints. legacy_unmatched count should
--- equal "x402watch indexed - KR Crypto stats.jsonl" delta (~1,109
--- non-x402 transfers).
+SELECT 'AFTER backfill — Solana settlements that got INSERTed fresh' AS section;
+SELECT COUNT(*) AS solana_inserted
+  FROM transactions
+ WHERE feed_merchant_id = 'kr-crypto'
+   AND chain LIKE 'solana:%';
+-- Expected: ~61 (KR Crypto's Solana payments — indexer/solana.py never
+-- captured these; the merchant feed INSERTed them).
 
 COMMIT;
 
--- ─── 10. Trigger downstream re-aggregation ───────────────────────────
--- (run separately after this transaction commits)
---
+
+-- ===================================================================
+-- D.  derive_global — run in a shell, NOT in psql
+-- ===================================================================
 --   cd /home/ubuntu/x402watch
 --   venv/bin/python -m indexer.derive_global
 --
--- This re-computes services.tx_total / volume / real_volume_pct / wash_pct
--- and buyer_seller_labels for KR Crypto's 11 endpoints.
+-- Re-aggregates services.tx_total / volume / real_volume_pct /
+-- wash_pct and buyer_seller_labels from the corrected transactions.
+-- After this the dashboard shows each KR Crypto endpoint's true
+-- numbers.
 
--- ─── 11. Rollback procedure ──────────────────────────────────────────
--- If anything looks wrong post-backfill:
+
+-- ===================================================================
+-- ROLLBACK
+-- ===================================================================
+-- Full restore from the section-2 backup:
 --
 --   BEGIN;
 --   TRUNCATE transactions;
 --   INSERT INTO transactions SELECT * FROM transactions_pre_v21_backup;
+--   COMMIT;
+--
+-- (The added columns can stay — they're harmless. Drop them too if a
+--  total revert is wanted:
 --   ALTER TABLE transactions
 --     DROP COLUMN attribution_source,
 --     DROP COLUMN feed_merchant_id,
---     DROP COLUMN is_x402_payment;
---   COMMIT;
+--     DROP COLUMN is_x402_payment; )
 --
--- The backup table is preserved indefinitely until manually dropped.
+-- Partial rollback — undo only the merchant-feed re-attribution,
+-- keep the schema:
+--   UPDATE transactions t
+--      SET service_id        = b.service_id,
+--          attribution_source= b.attribution_source,
+--          feed_merchant_id  = b.feed_merchant_id,
+--          is_x402_payment   = b.is_x402_payment
+--   FROM transactions_pre_v21_backup b
+--   WHERE t.tx_hash = b.tx_hash AND t.chain = b.chain;
+--   DELETE FROM transactions
+--    WHERE feed_merchant_id = 'kr-crypto'
+--      AND tx_hash NOT IN (SELECT tx_hash FROM transactions_pre_v21_backup);

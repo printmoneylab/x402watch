@@ -12,6 +12,8 @@
 | Option E — facilitator proxy | 🔜 Phase 3 (deferred) | Would give 100% across all merchants but requires running our own x402 facilitator or transparent proxy |
 | Backfill — KR Crypto via stats.jsonl | ✅ written (`backfill_kr_crypto.sql`) | idempotent, soft-delete via `attribution_source` column |
 | Solana indexing fix | 🟡 separate work item | `indexer/solana.py` currently produces 9 rows total; KR Crypto's 61 Base/Solana payments would be canonical truth set |
+| Merchant-feed Solana attribution | ✅ fixed in merchant_feed.py | Phase 2c dry-run rejected 7 Solana settlements: lookup keyed on `(seller_address, resource_url)` and no Solana seller row exists. Revised `ingest_feed()` matches on resource_url alone (same endpoint = one chain=base service row) + re-verifies merchant ownership. Solana payments now attribute to the Base service row. |
+| kr-news endpoints missing from `services` | 🔴 blocker for kr-news attribution | `kr-news/{kpop,kpop-summary,semiconductor,semiconductor-summary}` are live on Bazaar + receiving payments but were never indexed into `services` (sub-path endpoints — `bazaar.py` gap). Merchant feed cannot attribute to a non-existent service. Fix: one-off INSERT of the 4 rows (Phase 2c step 6b) until `bazaar.py` is fixed to index sub-path endpoints. |
 | Noise removal (non-x402 USDC transfers) | 🟡 separate work item | x402watch indexed 2,451 vs KR Crypto's 1,342 actual settlements → ~1,109 non-payment transfers wrongly attributed |
 
 ## 1. Why we shipped v2.0 with a broken input layer

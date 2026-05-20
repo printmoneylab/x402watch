@@ -202,6 +202,76 @@ venv/bin/python -m indexer.merchant_feed --merchant kr-crypto \
 # expect JSON: {"merchant_id":"kr-crypto","counts":{"accepted":N,...}}
 ```
 
+### Expected dry-run result + the two rejection causes
+
+The first dry-run (before this revision of merchant_feed.py) showed
+`accepted: 45, rejected_resource: 7`. Diagnosis:
+
+- **Solana settlements (7 in the 24h window) → all rejected.** The old
+  lookup keyed on `LOWER(seller_address) = $1 AND resource_url = $2`.
+  A Solana settlement's seller is the base58 `3Ywxk31…` wallet, but
+  x402watch registers each endpoint ONCE as a `chain=base` row owned
+  by the `0xcF92…` wallet — there is no Solana seller row. The revised
+  `ingest_feed()` matches on **resource_url alone** and re-verifies the
+  matched row's seller is one of the merchant's wallets, so a Solana
+  `kr-prices` payment now attributes to the same `kr-prices` service
+  as the Base payment. After this revision, those 7 move to `accepted`.
+
+- **kr-news/* endpoints → still rejected_resource (separate problem).**
+  `kr-news/kpop`, `kr-news/kpop-summary`, `kr-news/semiconductor`,
+  `kr-news/semiconductor-summary` appear in the feed (and on CDP
+  Bazaar) but have **no row in x402watch's `services` table** — they
+  were never indexed (sub-path endpoints; bazaar.py gap). The merchant
+  feed cannot attribute to a service that doesn't exist. These stay
+  rejected until the 4 rows are created — see step 6b. The 24h dry-run
+  window happened to contain zero kr-news payments, so they did not
+  show up in the 45/7 split, but the full 500-row feed has 8 kr-news
+  settlements (4 Base + 4 Solana).
+
+So a healthy post-revision dry-run is `accepted: 52, rejected_resource: 0`
+(within the 24h window). If `rejected_resource > 0`, list the offending
+resource_urls — they are endpoints missing from `services`:
+
+```bash
+venv/bin/python - << 'PY'
+import asyncio, json, urllib.request
+from indexer.merchant_feed import poll_merchant
+# patch ingest to print rejects, or just diff feed vs services manually:
+feed = json.load(urllib.request.urlopen(
+    "https://api.printmoneylab.com/.well-known/x402watch-feed.json"))
+print(sorted({s["resource_url"] for s in feed["settlements"]}))
+PY
+```
+
+### 6b. Register the kr-news endpoints in `services` (one-off)
+
+The 4 kr-news endpoints exist on Bazaar but not in `services`. Until
+bazaar.py is fixed to index sub-path endpoints, insert them manually
+so the merchant feed can attribute their payments. Confirm the exact
+columns of `services` first (`\d services`), then:
+
+```sql
+-- adjust column list to match the real services schema
+INSERT INTO services (chain, seller_address, resource_url, name, category, price_amount)
+VALUES
+ ('base','0xcf9223ece895258dea8d288aebcf846ab8e342fb',
+  'https://api.printmoneylab.com/api/v1/kr-news/kpop',
+  'Korean K-pop news', 'news', 0.001),
+ ('base','0xcf9223ece895258dea8d288aebcf846ab8e342fb',
+  'https://api.printmoneylab.com/api/v1/kr-news/kpop-summary',
+  'Korean K-pop news summary', 'news', 0.001),
+ ('base','0xcf9223ece895258dea8d288aebcf846ab8e342fb',
+  'https://api.printmoneylab.com/api/v1/kr-news/semiconductor',
+  'Korean semiconductor news', 'news', 0.001),
+ ('base','0xcf9223ece895258dea8d288aebcf846ab8e342fb',
+  'https://api.printmoneylab.com/api/v1/kr-news/semiconductor-summary',
+  'Korean semiconductor news summary', 'news', 0.001);
+```
+
+Verify prices against the live 402 challenge of each kr-news endpoint
+before inserting (the 0.001 above is a guess). After insert, re-run the
+dry-run — kr-news rejects should drop to 0.
+
 If the dry-run shows `accepted > 0` and no `rejected_*` surprises,
 run for real:
 

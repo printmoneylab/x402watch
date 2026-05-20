@@ -164,14 +164,38 @@ async def ingest_feed(conn, body: dict, dry_run: bool = False) -> dict:
             counts["rejected_seller"] += 1
             continue
 
-        # Find the canonical services row for (seller, resource_url).
+        # Find the services row by resource_url ALONE. The same endpoint
+        # is paid on Base (0x… seller) and Solana (base58 seller), but
+        # x402watch registers it once — a single chain=base row. Matching
+        # on seller_address too would reject every Solana settlement
+        # (no Solana seller row exists) and would also misuse SQL LOWER()
+        # on case-sensitive base58 addresses.
+        #
+        # Safe because: the feed is Ed25519-signed, `seller ∈
+        # seller_addresses` was already checked above, and we re-verify
+        # below that the services row we matched is owned by one of this
+        # merchant's wallets.
         svc = await conn.fetchrow("""
-            SELECT id, price_amount
+            SELECT id, price_amount, seller_address
             FROM services
-            WHERE LOWER(seller_address) = $1 AND resource_url = $2
+            WHERE resource_url = $1
+            ORDER BY id
             LIMIT 1
-        """, seller, s.get("resource_url"))
+        """, s.get("resource_url"))
         if svc is None:
+            # resource_url not in services at all — e.g. an endpoint
+            # registered on Bazaar but not yet indexed by x402watch
+            # (the kr-news/* sub-path endpoints are the current example).
+            counts["rejected_resource"] += 1
+            continue
+        # Defence-in-depth: the matched services row must belong to this
+        # merchant. EVM addresses compare case-insensitively; base58
+        # (Solana) addresses are case-sensitive — never lowercase them.
+        _svc_seller = svc["seller_address"] or ""
+        _svc_seller_norm = (
+            _svc_seller.lower() if _svc_seller.startswith("0x") else _svc_seller
+        )
+        if _svc_seller_norm not in sellers:
             counts["rejected_resource"] += 1
             continue
 

@@ -31,6 +31,15 @@ ALTER TABLE transactions
 CREATE INDEX IF NOT EXISTS transactions_attribution_idx
     ON transactions (attribution_source, time DESC);
 
+-- Non-unique lookup index on (tx_hash, chain). transactions is a
+-- TimescaleDB hypertable partitioned on `time`, so a UNIQUE index that
+-- omits the partition column is rejected — we cannot use
+-- `ON CONFLICT (tx_hash, chain)`. The merchant feed indexer and the
+-- backfill below therefore do explicit SELECT-then-UPDATE/INSERT, and
+-- this index keeps that lookup fast.
+CREATE INDEX IF NOT EXISTS transactions_txhash_chain_idx
+    ON transactions (tx_hash, chain);
+
 -- Merchant feed registry — see merchant_feed_spec.md §3
 CREATE TABLE IF NOT EXISTS merchant_feed_keys (
     merchant_id      TEXT NOT NULL,
@@ -51,12 +60,14 @@ CREATE TABLE IF NOT EXISTS merchant_feed_state (
 );
 
 -- ─── 2. Backup table — full snapshot, NEVER modified by anything below
+-- `CREATE TABLE IF NOT EXISTS … AS SELECT` is atomic and idempotent:
+-- the first run creates the table and copies every row; a second run
+-- sees the table already exists and skips the SELECT entirely, so the
+-- backup is never doubled. (The old INSERT … ON CONFLICT DO NOTHING
+-- was wrong — the backup table has no constraint, so a re-run would
+-- have appended a second full copy.)
 CREATE TABLE IF NOT EXISTS transactions_pre_v21_backup AS
-SELECT * FROM transactions WHERE FALSE;       -- structure-only first
-
-INSERT INTO transactions_pre_v21_backup
-    SELECT * FROM transactions
-    ON CONFLICT DO NOTHING;                   -- second invocation = no-op
+SELECT * FROM transactions;
 
 -- ─── 3. Mark all pre-existing rows as legacy_collapse ────────────────
 UPDATE transactions
@@ -156,6 +167,10 @@ SELECT COUNT(*) AS updated_rows FROM updated;
 -- These are settlements KR Crypto saw but the indexer missed entirely
 -- (e.g. Solana, where indexer/solana.py is broken). Insert with the
 -- correct attribution from the start.
+--
+-- No ON CONFLICT clause: transactions is a TimescaleDB hypertable and
+-- a UNIQUE index on (tx_hash, chain) — which omits the `time` partition
+-- column — is not creatable. The NOT EXISTS guard below is the dedupe.
 INSERT INTO transactions (
     tx_hash, chain, time, buyer_address, seller_address, service_id,
     amount, attribution_source, feed_merchant_id, is_x402_payment
@@ -172,13 +187,10 @@ SELECT
     'kr-crypto',
     TRUE
 FROM kr_crypto_resolved r
-LEFT JOIN transactions t USING (tx_hash, chain)
-WHERE t.tx_hash IS NULL
-  AND NOT EXISTS (
+WHERE NOT EXISTS (
     SELECT 1 FROM transactions t2
      WHERE t2.tx_hash = r.tx_hash AND t2.chain = r.chain_norm
-  )
-ON CONFLICT (tx_hash, chain) DO NOTHING;
+  );
 
 -- ─── 8. Mark remaining seller-0xcF92 rows as 'legacy_unmatched' ──────
 -- Rows that look like they came from KR Crypto's seller but weren't in

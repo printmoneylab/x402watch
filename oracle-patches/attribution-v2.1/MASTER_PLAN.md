@@ -5,7 +5,7 @@
 | Item | Status | Notes |
 |---|---|---|
 | Root cause | ✅ confirmed | `evm.py:165` 의 `GROUP BY seller_address` + `MIN(id)` collapses N endpoints → 1 service_id |
-| Option A — price-based fallback | ✅ designed (`evm_attribution_patch.py`) | 1-line evm.py change; 11→4 KR Crypto attribution buckets |
+| Option A — price-based fallback | 🟡 ON HOLD — needs P4 | `evm_attribution_patch.py` P1/P2/P3 applied cleanly but regressed: `index_chain` (~L264) does `[pad_topic_address(a) for a in seller_map.keys()]` — keys are now tuples → `AttributeError: 'tuple' object has no attribute 'lower'`. Rolled back. Resume after Phase 2c+2d with a P4 patch (see §8) |
 | Option B — CDP settlement log | ❌ infeasible | Verified against `coinbase/cdp-sdk` `X402FacilitatorApi.java` + `coinbase/x402` Python facilitator: no settlement-log endpoint exists. `verify` / `settle` / `discovery/resources` only. 401s on `/discovery/settlements` were default-404-as-401 |
 | Option C — calldata parsing | ❌ structural | x402 settles via `USDC.transferWithAuthorization` (EIP-3009) which has no resource-URL slot; resource_url lives only in the X-Payment HTTP header |
 | Option D — merchant feed | ✅ designed (spec + KR/indexer stubs) | Opt-in. 100% accurate for adopting merchants. Ed25519-signed JSON feed at `merchant.example.com/api/v1/x402watch-feed.json` |
@@ -138,3 +138,42 @@ If any invariant breaks during a Phase 2 step → rollback before continuing.
 - Solana indexer rewrite (currently 9 rows total — separate work item)
 - Non-x402 USDC transfer noise filtering for non-KR sellers (we don't have ground truth feeds yet)
 - CDP authenticated discovery (auth would only give us metadata we already have via unauth)
+
+## 8. Phase 2b — pending P4 patch (resume after 2c + 2d)
+
+`evm_attribution_patch.py` P1/P2/P3 are correct and verified, but
+applying them alone regresses `index_chain`. The chain-indexer body
+(evm.py ~L260-270) does:
+
+```python
+padded_sellers = [pad_topic_address(a) for a in seller_map.keys()]
+```
+
+After P1 the keys are `(addr, amount_micro)` tuples; `pad_topic_address`
+calls `addr.lower()` → `AttributeError: 'tuple' object has no
+attribute 'lower'`. The whole indexer crashes; Moa rolled back to
+`evm.py.bak.attribution-v21-*` and the original indexer is running.
+
+**P4 (to be added to the patcher):** the RPC log filter only needs the
+distinct *addresses*, not the amount component. Change the seller-set
+derivation to unpack the tuple key:
+
+```python
+# before
+padded_sellers = [pad_topic_address(a) for a in seller_map.keys()]
+# after
+padded_sellers = [
+    pad_topic_address(addr)
+    for addr in {k[0] for k in seller_map.keys()}
+]
+```
+
+The `{k[0] for k in seller_map.keys()}` set-comprehension also
+deduplicates — a seller with 4 price tiers yields 4 map keys but only
+one address to filter on, which is what we want.
+
+P4 needs the exact evm.py:260-270 source to anchor on. Moa to paste
+`sed -n '258,272p' indexer/evm.py` when Phase 2b resumes. Until then
+Phase 2b stays rolled back; Phase 2c (merchant feed) and Phase 2d
+(backfill) proceed independently — they write `transactions.service_id`
+by tx_hash and never touch `evm.py`.

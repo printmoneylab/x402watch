@@ -78,20 +78,6 @@ def _canonical_json(obj: Any) -> bytes:
                       ensure_ascii=False).encode("utf-8")
 
 
-def _verify_signature(body: dict) -> tuple[bool, str]:
-    """Returns (ok, reason). body must include `signature` field."""
-    sig = body.get("signature") or {}
-    if sig.get("alg") != "Ed25519":
-        return False, "unsupported_alg"
-    key_id = sig.get("key_id")
-    value_b64 = sig.get("value")
-    if not key_id or not value_b64:
-        return False, "incomplete_signature"
-    # Look up the public key
-    # (sync DB lookup happens at caller; this helper takes the key bytes)
-    return True, "deferred"  # placeholder — real verify happens in verify_feed()
-
-
 async def _lookup_public_key(conn, merchant_id: str, key_id: str,
                              issued_at: datetime) -> Optional[bytes]:
     row = await conn.fetchrow("""
@@ -205,34 +191,47 @@ async def ingest_feed(conn, body: dict, dry_run: bool = False) -> dict:
             counts["accepted"] += 1
             continue
 
-        # UPSERT — if the tx row already exists with a different service_id,
-        # update it; otherwise insert fresh.
         try:
             ts_raw = s.get("settled_at", "")
             ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
         except Exception:
             ts = datetime.now(timezone.utc)
 
-        result = await conn.execute("""
-            INSERT INTO transactions (
-                tx_hash, chain, time, buyer_address, seller_address,
-                service_id, amount, attribution_source, feed_merchant_id,
-                is_x402_payment
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE)
-            ON CONFLICT (tx_hash, chain) DO UPDATE
-              SET service_id = EXCLUDED.service_id,
-                  attribution_source = EXCLUDED.attribution_source,
-                  feed_merchant_id = EXCLUDED.feed_merchant_id,
-                  is_x402_payment = TRUE
-        """,
-            s.get("tx_hash"), s.get("chain"), ts,
-            s.get("payer"), seller, svc["id"], feed_amount,
-            f"merchant_feed:{merchant_id}", merchant_id,
+        # SELECT-then-UPDATE-or-INSERT instead of `INSERT … ON CONFLICT
+        # (tx_hash, chain)`. `transactions` is a TimescaleDB hypertable
+        # partitioned on `time`; a UNIQUE index that does NOT include the
+        # partition column is rejected, so ON CONFLICT (tx_hash, chain)
+        # has no constraint to target. The lookup below relies on the
+        # non-unique (tx_hash, chain) index added in backfill_kr_crypto.sql.
+        existing = await conn.fetchval(
+            "SELECT 1 FROM transactions WHERE tx_hash = $1 AND chain = $2 LIMIT 1",
+            s.get("tx_hash"), s.get("chain"),
         )
-        if result.startswith("INSERT 0 1") or result.startswith("UPDATE 1"):
-            counts["accepted"] += 1
+        if existing:
+            await conn.execute("""
+                UPDATE transactions
+                   SET service_id = $1,
+                       attribution_source = $2,
+                       feed_merchant_id = $3,
+                       is_x402_payment = TRUE
+                 WHERE tx_hash = $4 AND chain = $5
+            """,
+                svc["id"], f"merchant_feed:{merchant_id}", merchant_id,
+                s.get("tx_hash"), s.get("chain"),
+            )
         else:
-            counts["unchanged"] += 1
+            await conn.execute("""
+                INSERT INTO transactions (
+                    tx_hash, chain, time, buyer_address, seller_address,
+                    service_id, amount, attribution_source, feed_merchant_id,
+                    is_x402_payment
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE)
+            """,
+                s.get("tx_hash"), s.get("chain"), ts,
+                s.get("payer"), seller, svc["id"], feed_amount,
+                f"merchant_feed:{merchant_id}", merchant_id,
+            )
+        counts["accepted"] += 1
 
     if not dry_run:
         await conn.execute("""

@@ -155,3 +155,4 @@ next-env.d.ts
 secrets/
 .DS_Store
 __pycache__/
+handoff파일/

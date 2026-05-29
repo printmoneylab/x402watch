@@ -217,16 +217,36 @@ def _find_stats_write_calls(
     return out
 
 
+_POST_SETTLE_CALL_NAMES = ("_notify_post_settle", "notify_post_settle_failure")
+
+
 def _find_notify_post_settle_calls(tree: ast.Module) -> list[ast.Call]:
-    """All `_notify_post_settle(...)` calls (Name only — the local alias)."""
+    """All post-settle-failure notifier Calls.
+
+    api.py may call the function by its local alias (`_notify_post_settle`)
+    or by the canonical name exported from telegram_notify
+    (`notify_post_settle_failure`). Match either, by Name *or* by
+    Attribute access (e.g. `telegram_notify.notify_post_settle_failure`).
+    Calls inside the helper-insertion target file's own def (i.e. inside
+    a FunctionDef whose name matches) are excluded so the patcher only
+    sees call-sites, not the definition itself."""
     out: list[ast.Call] = []
     for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "_notify_post_settle"
-        ):
-            out.append(node)
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name: Optional[str] = None
+        if isinstance(f, ast.Name):
+            name = f.id
+        elif isinstance(f, ast.Attribute):
+            name = f.attr
+        if name in _POST_SETTLE_CALL_NAMES:
+            # Must have BOTH tx_hash and payer_wallet kwargs — that's
+            # what makes it the call we want to rewrite. Filters out
+            # any unrelated call that happens to share the name.
+            kw_names = {kw.arg for kw in node.keywords if kw.arg}
+            if "tx_hash" in kw_names and "payer_wallet" in kw_names:
+                out.append(node)
     return out
 
 

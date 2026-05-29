@@ -37,8 +37,9 @@ grep -cE '_stats_write\(\{"kind": ?"payment"' app/api.py
 grep -cE '_stats_write\(\{"kind": ?"post_settle_fail"' app/api.py
 # expect: 1 / 1 (멀티라인이라 ast 매칭 기준 결과는 다를 수 있음 — 지표용)
 
-# 1f. _notify_post_settle 호출 — 정확히 1개 + tx_hash=None/payer_wallet=None
-grep -nB1 -A8 "_notify_post_settle(" app/api.py | head -30
+# 1f. post-settle 알림 호출 — 정확히 1개 + tx_hash=None/payer_wallet=None
+# (alias `_notify_post_settle` 또는 canonical `notify_post_settle_failure` 어느 쪽이든 매칭)
+grep -nB1 -A8 -E "_notify_post_settle\(|notify_post_settle_failure\(" app/api.py | head -30
 # expect: tx_hash=None, payer_wallet=None 라인 보임
 
 # 1g. 헬퍼 / 패처 흔적 — 재실행 시 idempotent 동작 확인용
@@ -62,9 +63,12 @@ grep -n "_decode_x_payment_response" app/api.py
 - 1e 결과가 0/1 = grep 카운트일 수도 있음(멀티라인). 그래도 패처의 AST
   매치는 `_stats_write` Call + 첫 인자 Dict 의 `"kind"` 키 상수값으로
   하므로 결과가 비신뢰. **진짜 정답은 dry-run 노트**.
-- 1f에 `_notify_post_settle` 가 없음 → api.py 가 직접 `notify_post_settle_failure`
-  를 import 해 쓰는 경우. 패처가 0개로 abort. **STOP**, 호출 alias 확인 후
-  패처 코드의 `func.id == "_notify_post_settle"` 매치명을 조정.
+- 1f에 둘 다 0개 → api.py 가 post-settle 알림을 다른 이름으로 호출.
+  패처는 `_notify_post_settle` + `notify_post_settle_failure` 두 이름
+  모두 매칭 + `tx_hash`/`payer_wallet` kwarg 동반 조건으로 필터하므로
+  drift 가 아닌 진짜 없음. 1a 의 post_settle_fail 블록 paste 요청.
+- 1f에 2개 이상 → 같은 시그너처의 호출이 둘 이상. 패처가 `expected
+  exactly 1` 로 abort. 1a 블록 paste 요청.
 
 ## Step 2 — 패처 적용
 

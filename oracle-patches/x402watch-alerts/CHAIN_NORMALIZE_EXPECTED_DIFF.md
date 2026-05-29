@@ -95,7 +95,7 @@ target 은 `s.get("chain")` Call 을 가진 유일한 모듈-레벨 FunctionDef.
   AND chain = $2`) — 그대로.
 - 다른 함수 (`_other_helper`, signing, indexer entry 등) — `s.get("chain")`
   안 가지면 무영향.
-- `service_id` / `attribution_source` / `feed_merchant_id` / `amount_usd`
+- `service_id` / `attribution_source` / `feed_merchant_id` / `amount`
   / `is_x402_payment` 등 다른 컬럼 처리 로직.
 
 ## B. `transactions` 테이블 상태 변화
@@ -140,7 +140,7 @@ polygon   | 0        | 0
 - `transactions` 테이블 스키마 (컬럼 / 인덱스 / 제약 / 트리거).
 - `services`, `categories`, `merchant_feed_keys`, `recompute_queue`,
   `label_disputes` 등 다른 테이블 — 무관.
-- `created_at`, `amount_usd`, `block_number`, `from_addr`, `to_addr`
+- `time`, `amount`, `block_number`, `from_addr`, `to_addr`
   등 dup row 가 가져다 줄 게 없는 컬럼 — base row 의 기존값 유지.
 - attribution 이 NULL 인 dup row 가 있으면 base 의 attribution 도 NULL 로
   덮어쓰지 않음 (`IS DISTINCT FROM` 조건이 no-op 시 UPDATE 자체를 스킵).

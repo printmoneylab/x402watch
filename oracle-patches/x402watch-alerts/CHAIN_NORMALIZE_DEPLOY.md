@@ -76,9 +76,9 @@ SELECT
 # 1e. 5월 매출 baseline (DB 현재 = 거품 포함값)
 sudo docker exec x402watch-postgres psql -U x402watch -d x402watch -c "
 SELECT chain, COUNT(*) AS n_rows,
-       ROUND(SUM(amount_usd)::numeric, 4) AS sum_usd
+       ROUND(SUM(amount)::numeric, 4) AS sum_usd
   FROM transactions
- WHERE created_at >= '2026-05-01' AND created_at < '2026-06-01'
+ WHERE time >= '2026-05-01' AND time < '2026-06-01'
  GROUP BY chain ORDER BY chain;"
 # expect (대략): base 5,281 row $58.54, eip155:8453 ~중복분 (KR Crypto)
 
@@ -220,20 +220,20 @@ SELECT COUNT(*) AS remaining_caip2_or_solana_addr
 # 5b. 5월 매출 — MetaMask $37 과 일치
 sudo docker exec x402watch-postgres psql -U x402watch -d x402watch -c "
 SELECT chain, COUNT(*) AS n_rows,
-       ROUND(SUM(amount_usd)::numeric, 4) AS sum_usd
+       ROUND(SUM(amount)::numeric, 4) AS sum_usd
   FROM transactions
- WHERE created_at >= '2026-05-01' AND created_at < '2026-06-01'
+ WHERE time >= '2026-05-01' AND time < '2026-06-01'
  GROUP BY chain ORDER BY chain;"
 # expect: 총합 ≈ $37 ± $1, base / solana / … 만 (eip155:%, solana:% 없음)
 
 # 5c. KR Crypto endpoint attribution 보존 (service_id 14391/14727/14741 등)
 sudo docker exec x402watch-postgres psql -U x402watch -d x402watch -c "
 SELECT service_id, COUNT(*) AS n_tx,
-       ROUND(SUM(amount_usd)::numeric, 4) AS sum_usd,
+       ROUND(SUM(amount)::numeric, 4) AS sum_usd,
        MAX(attribution_source) AS attr
   FROM transactions
  WHERE service_id IN (14391, 14727, 14741)
-   AND created_at >= '2026-05-01'
+   AND time >= '2026-05-01'
  GROUP BY service_id ORDER BY service_id;"
 # expect: 각 service_id 의 attribution_source 가 merchant_feed_signed 또는
 #         spec 상의 정상 값. is_x402_payment = TRUE.

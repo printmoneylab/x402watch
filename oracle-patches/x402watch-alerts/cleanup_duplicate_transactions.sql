@@ -45,10 +45,10 @@ SELECT chain, COUNT(*) AS n
 \echo '=== BEFORE — revenue (5월) by chain, includes duplicates ==='
 SELECT chain,
        COUNT(*) AS n_rows,
-       ROUND(SUM(amount_usd)::numeric, 4) AS sum_usd
+       ROUND(SUM(amount)::numeric, 4) AS sum_usd
   FROM transactions
- WHERE created_at >= '2026-05-01'
-   AND created_at <  '2026-06-01'
+ WHERE time >= '2026-05-01'
+   AND time <  '2026-06-01'
  GROUP BY chain
  ORDER BY chain;
 
@@ -91,7 +91,7 @@ END$$;
 -- Each readable-chain row gets the matching dup row's service_id,
 -- attribution_source, feed_merchant_id, and is_x402_payment=TRUE. If
 -- multiple dup rows share a tx_hash (shouldn't happen, but defensive),
--- pick the most recent by created_at.
+-- pick the most recent by time.
 \echo ''
 \echo '=== Step A — promoting attribution from dup → base ==='
 
@@ -103,7 +103,7 @@ WITH dup_attr AS (
            feed_merchant_id
       FROM transactions
      WHERE chain LIKE 'eip155:%' OR chain LIKE 'solana:%'
-     ORDER BY tx_hash, created_at DESC NULLS LAST
+     ORDER BY tx_hash, time DESC NULLS LAST
 )
 UPDATE transactions base
    SET service_id        = dup_attr.service_id,
@@ -147,20 +147,20 @@ SELECT COUNT(*) AS remaining
 \echo '=== AFTER — revenue (5월) by chain ==='
 SELECT chain,
        COUNT(*) AS n_rows,
-       ROUND(SUM(amount_usd)::numeric, 4) AS sum_usd
+       ROUND(SUM(amount)::numeric, 4) AS sum_usd
   FROM transactions
- WHERE created_at >= '2026-05-01'
-   AND created_at <  '2026-06-01'
+ WHERE time >= '2026-05-01'
+   AND time <  '2026-06-01'
  GROUP BY chain
  ORDER BY chain;
 
 \echo ''
 \echo '=== AFTER — revenue (5월) total (compare against MetaMask balance) ==='
 SELECT COUNT(*) AS n_rows,
-       ROUND(SUM(amount_usd)::numeric, 4) AS total_sum_usd
+       ROUND(SUM(amount)::numeric, 4) AS total_sum_usd
   FROM transactions
- WHERE created_at >= '2026-05-01'
-   AND created_at <  '2026-06-01';
+ WHERE time >= '2026-05-01'
+   AND time <  '2026-06-01';
 
 -- Change to ROLLBACK to dry-run.
 COMMIT;

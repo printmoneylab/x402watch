@@ -46,11 +46,12 @@
 
 ### A.2 ingest 함수 안 chain 정규화 + 4 곳 교체
 
-target 은 `s.get("chain")` Call 을 가진 유일한 모듈-레벨 FunctionDef.
-첫 chain-쓰는 stmt 직전에 두 줄 삽입 + 4 곳 callsite 교체.
+target 은 `s.get("chain")` Call 을 가진 유일한 모듈-레벨 FunctionDef
+— 캐노니컬 소스 기준 `ingest_feed`. 첫 chain-쓰는 stmt 직전에 두 줄
+삽입 + 3 곳 callsite 교체 (dedupe SELECT args / UPDATE args / INSERT args).
 
 ```diff
- async def ingest_settlement(c, s):
+ async def ingest_feed(conn, body: dict, dry_run: bool = False) -> dict:
 +    raw_chain = s.get("chain")
 +    norm_chain = normalize_chain(raw_chain)
      existing = await c.fetchrow(
@@ -81,8 +82,10 @@ target 은 `s.get("chain")` Call 을 가진 유일한 모듈-레벨 FunctionDef.
          )
 ```
 
-- spec 의 4 callsite (`:232` dedupe / `:237` UPDATE WHERE / `:249` INSERT
-  VALUES / `:250` INSERT row) 가 모두 `norm_chain` 으로 바뀜.
+- 캐노니컬 기준 3 callsite (`:233` dedupe SELECT args / `:245` UPDATE args /
+  `:255` INSERT args) 가 모두 `norm_chain` 으로 바뀜. (user spec 의 "4곳"
+  은 INSERT 의 VALUES + row 를 분리 카운트했지만 실제 `s.get("chain")` Call
+  은 INSERT args 안에 1개.)
 - `s.get("chain")` 의 다른 형태 (`s.get("chain", "base")` 같이 default 인자
   있는 경우) 도 AST 매치는 동일하게 동작.
 - 다른 변수 / 함수 / 다른 `s.get(...)` 호출 (예: `s.get("tx_hash")`) 는

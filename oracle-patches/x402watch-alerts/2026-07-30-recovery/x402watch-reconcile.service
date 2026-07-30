@@ -1,0 +1,11 @@
+[Unit]
+Description=x402watch attribution reconciliation
+After=postgresql.service docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/x402watch
+ExecStart=/home/ubuntu/x402watch/scripts/run_reconcile.sh
+StandardOutput=append:/home/ubuntu/x402watch/logs/reconcile.log
+StandardError=append:/home/ubuntu/x402watch/logs/reconcile.log
